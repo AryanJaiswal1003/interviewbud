@@ -40,8 +40,11 @@ class Base(DeclarativeBase):
 class User(Base):
     __tablename__ = "users"
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)  # stored lower-cased
-    password_hash: Mapped[str] = mapped_column(String(255))
+    # No sign-up or sign-in: an account is a name plus a random account key that lives in the person's browser
+    # (only its SHA-256 is stored here). Email/password are legacy, kept only for accounts made before.
+    email: Mapped[str | None] = mapped_column(String(320), unique=True, index=True, nullable=True)
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    account_key_hash: Mapped[str | None] = mapped_column(String(64), unique=True, index=True, nullable=True)
     display_name: Mapped[str] = mapped_column(String(120), default="")
     headline: Mapped[str] = mapped_column(String(200), default="")
     accent: Mapped[str] = mapped_column(String(16), default="amber")  # avatar colour when there's no photo
@@ -143,6 +146,7 @@ class PrepSession(Base):
     pending_action: Mapped[str] = mapped_column(String(300), default="")
     coverage: Mapped[dict] = mapped_column(default=dict)  # {requirement_id: {status, fact_ids, note}}
     recommendations: Mapped[dict] = mapped_column(default=dict)  # {interview_id: {...}}
+    similar_jobs: Mapped[dict] = mapped_column(default=dict)  # {generated_at, items: [...]} (see prep/jobs.py)
     error: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -156,8 +160,10 @@ class PrepQuestion(Base):
     requirement_id: Mapped[str] = mapped_column(String(20), default="")
     question: Mapped[str] = mapped_column(Text)
     why: Mapped[str] = mapped_column(Text, default="")
+    quick_replies: Mapped[list] = mapped_column(default=list)  # tap-to-answer options, when the answer is one of a few
     answer: Mapped[str] = mapped_column(Text, default="")
-    status: Mapped[str] = mapped_column(String(12), default="open")  # open | answered | skipped
+    # queued (asked next) | open (on screen) | answered | skipped
+    status: Mapped[str] = mapped_column(String(12), default="open")
     fact_id: Mapped[int | None] = mapped_column(ForeignKey("profile_facts.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -172,6 +178,31 @@ class PrepPlan(Base):
     plan: Mapped[dict] = mapped_column(default=dict)
     note: Mapped[str] = mapped_column(Text, default="")  # what changed / the revision request
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Application(Base):
+    """Applying to the job on the candidate's behalf. Every step is separate and explicit: read the form ->
+    the candidate reviews and approves each value (with where it came from) -> fill (screenshot, not sent) ->
+    submit only on the candidate's click. `history` is an append-only log of what happened."""
+    __tablename__ = "applications"
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    owner_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    prep_id: Mapped[UUID] = mapped_column(ForeignKey("prep_sessions.id", ondelete="CASCADE"), index=True)
+    apply_url: Mapped[str] = mapped_column(Text, default="")
+    ats: Mapped[str] = mapped_column(String(20), default="")  # greenhouse | lever | ashby | generic
+    # reading | ready | approved | filling | filled | submitting | submitted | needs_you | failed
+    status: Mapped[str] = mapped_column(String(20), default="reading")
+    fields: Mapped[list] = mapped_column(default=list)  # the form as read: [{key, label, type, required, ...}]
+    values: Mapped[dict] = mapped_column(default=dict)  # {key: {value, source, detail, state}}
+    approved: Mapped[dict] = mapped_column(default=dict)  # snapshot of values at approval
+    fill_report: Mapped[dict] = mapped_column(default=dict)
+    confirmation: Mapped[str] = mapped_column(Text, default="")
+    history: Mapped[list] = mapped_column(default=list)
+    error: Mapped[str] = mapped_column(Text, default="")
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class Voice(Base):
@@ -205,6 +236,9 @@ class Interview(Base):
     prep_id: Mapped[UUID | None] = mapped_column(ForeignKey("prep_sessions.id", ondelete="SET NULL"), nullable=True,
                                                  index=True)
     plan_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # interview (technical practice / resume screen) | screening (friendly background call that fills the profile
+    # and the application answers)
+    kind: Mapped[str] = mapped_column(String(12), default="interview")
     candidate_id: Mapped[UUID] = mapped_column(ForeignKey("candidates.id", ondelete="CASCADE"))
     role: Mapped[str] = mapped_column(String(200))
     seniority: Mapped[str] = mapped_column(String(50), default="mid")
@@ -341,10 +375,21 @@ async def init_db() -> None:
         await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_interviews_owner_id ON interviews (owner_id)"))
         await conn.execute(text("ALTER TABLE problem_tests ADD COLUMN IF NOT EXISTS expected_json JSONB"))
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT false"))
+        await conn.execute(text("ALTER TABLE users ALTER COLUMN email DROP NOT NULL"))
+        await conn.execute(text("ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL"))
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS account_key_hash VARCHAR(64)"))
+        await conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_account_key_hash ON users "
+                                "(account_key_hash)"))
         await conn.execute(text("ALTER TABLE interviews ADD COLUMN IF NOT EXISTS prep_id UUID "
                                 "REFERENCES prep_sessions(id) ON DELETE SET NULL"))
         await conn.execute(text("ALTER TABLE interviews ADD COLUMN IF NOT EXISTS plan_version INTEGER"))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_interviews_prep_id ON interviews (prep_id)"))
+        await conn.execute(text("ALTER TABLE interviews ADD COLUMN IF NOT EXISTS kind VARCHAR(12) NOT NULL "
+                                "DEFAULT 'interview'"))
+        await conn.execute(text("ALTER TABLE prep_sessions ADD COLUMN IF NOT EXISTS similar_jobs JSONB NOT NULL "
+                                "DEFAULT '{}'::jsonb"))
+        await conn.execute(text("ALTER TABLE prep_questions ADD COLUMN IF NOT EXISTS quick_replies JSONB NOT NULL "
+                                "DEFAULT '[]'::jsonb"))
         # Existing installs: if nobody is admin yet, the earliest account becomes admin.
         await conn.execute(text("UPDATE users SET is_admin = true WHERE id = (SELECT id FROM users ORDER BY created_at "
                                 "LIMIT 1) AND NOT EXISTS (SELECT 1 FROM users WHERE is_admin)"))

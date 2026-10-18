@@ -57,6 +57,17 @@ class Settings(BaseSettings):
     firecrawl_api_key: str = ""
     browserless_api_key: str = ""
     browserless_url: str = "https://production-sfo.browserless.io"
+    # Similar jobs: public boards searched besides the posting's own company ("ats:token", comma-separated).
+    job_boards: str = ("greenhouse:anthropic,greenhouse:stripe,greenhouse:figma,greenhouse:databricks,"
+                       "greenhouse:cloudflare,greenhouse:discord,greenhouse:airbnb,greenhouse:robinhood,"
+                       "greenhouse:coinbase,greenhouse:gitlab,greenhouse:reddit,greenhouse:pinterest,greenhouse:lyft,"
+                       "greenhouse:instacart,greenhouse:dropbox,ashby:openai,ashby:ramp,ashby:linear,ashby:notion,"
+                       "lever:palantir,lever:spotify")
+    # Applying on the candidate's behalf drives a real browser. BROWSER_WS_URL points at a Playwright server
+    # (`playwright run-server`) in its own container; empty = launch a local headless Chromium (development).
+    browser_ws_url: str = ""
+    # Tests only: let the application browser open private/loopback addresses (a local test form).
+    apply_allow_private: bool = False
 
     # Auth. SECRET_KEY signs agent tokens; generated once into backend/data/.secret_key if unset.
     secret_key: str = ""

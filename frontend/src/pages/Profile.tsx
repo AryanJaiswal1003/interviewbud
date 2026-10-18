@@ -2,7 +2,7 @@ import { Camera, Laptop, LogOut, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { PageHeader, Segmented } from "../components/ui";
-import { getConsent, setConsent, track } from "../lib/analytics";
+import { getConsent, setConsent } from "../lib/analytics";
 import { api, fmtDate } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { setTheme, useTheme } from "../lib/theme";
@@ -39,7 +39,7 @@ function Section({ title, sub, children }: { title: string; sub?: string; childr
 }
 
 export default function Profile() {
-  const { user, update, setUser, logout } = useAuth();
+  const { user, update, setUser, logout, forget } = useAuth();
   const nav = useNavigate();
   const theme = useTheme();
   const [form, setForm] = useState({ display_name: "", headline: "", timezone: "" });
@@ -75,7 +75,7 @@ export default function Profile() {
 
   return (
     <div className="mx-auto max-w-4xl px-6 py-10 md:px-10">
-      <PageHeader title="Your profile" sub={`Signed in as ${user.email} · member since ${fmtDate(user.created_at)}`} />
+      <PageHeader title="Your profile" sub={`Account ID ${user.account_id} · since ${fmtDate(user.created_at)}`} />
       {(saved || err) && (
         <p role="status" className={"mt-4 rounded-lg px-4 py-2 text-sm " + (err ? "bg-coral-soft text-alarm" : "bg-marine-soft text-marine-ink")}>
           {err ?? `${saved} saved.`}
@@ -163,22 +163,27 @@ export default function Profile() {
             <div className="mt-1.5"><Segmented label="Theme" value={theme} options={[{ value: "dark", label: "Dark" }, { value: "light", label: "Light" }]}
               onChange={(t) => { setTheme(t); save({ preferences: { theme: t } }, "Theme"); }} /></div></div>
           <div><div className="text-sm font-semibold">Analytics cookies</div>
-            <p className="mt-1 text-sm text-graphite">Lets us see which features get used. First-party only; sign-in cookies are always on.</p>
+            <p className="mt-1 text-sm text-graphite">Lets us see which features get used. First-party only; the cookie that remembers your account is always on.</p>
             <div className="mt-2"><Segmented label="Analytics cookies" value={consent ?? "essential"}
               options={[{ value: "all", label: "Allowed" }, { value: "essential", label: "Off" }]}
               onChange={(c) => { setConsent(c); setConsentState(c); save({ preferences: { analytics: c === "all" } }, "Cookie choice"); }} /></div></div>
         </div>
       </Section>
 
-      <Security onSignedOut={() => nav("/login")} />
+      <ApplicationDetails />
 
-      <Section title="Delete account" sub="Removes your account, your interviews and their transcripts. This can't be undone.">
-        <DeleteAccount onDeleted={async () => { await logout(); nav("/signup"); }} />
+      <Devices />
+
+      <Section title="Delete account" sub="Removes your account, your interviews, preparations and applications. This can't be undone.">
+        <DeleteAccount onDeleted={async () => { forget(user.id); await logout(); nav("/welcome"); }} />
       </Section>
 
-      <div className="mt-6">
-        <button className="inline-flex items-center gap-2 text-sm text-graphite underline" onClick={async () => { await logout(); nav("/login"); }}>
-          <LogOut size={15} /> Log out of this device
+      <div className="mt-6 flex flex-wrap gap-5">
+        <button className="inline-flex items-center gap-2 text-sm text-graphite underline" onClick={async () => { await logout(); nav("/welcome"); }}>
+          <LogOut size={15} /> Switch account
+        </button>
+        <button className="text-sm text-graphite underline" onClick={async () => { forget(user.id); await logout(); nav("/welcome"); }}>
+          Remove this account from this browser
         </button>
       </div>
     </div>
@@ -190,55 +195,84 @@ function AccentAvatar({ name, accent }: { name: string; accent: string }) {
   return <span className={`flex h-20 w-20 items-center justify-center rounded-full font-display text-3xl font-semibold ${bg}`}>{(name || "?").charAt(0).toUpperCase()}</span>;
 }
 
-function Security({ onSignedOut }: { onSignedOut: () => void }) {
+function Devices() {
   const [sessions, setSessions] = useState<any[]>([]);
-  const [pw, setPw] = useState({ current: "", new: "" });
-  const [msg, setMsg] = useState<string | null>(null);
   const load = () => api("/api/auth/sessions").then(setSessions).catch(() => {});
   useEffect(() => { load(); }, []);
+  if (sessions.length < 2) return null;
   return (
-    <Section title="Security" sub="Your password and the devices signed in to your account.">
-      <form className="grid max-w-md gap-3" onSubmit={async (e) => {
-        e.preventDefault();
-        setMsg(null);
-        try {
-          await api("/api/auth/me/password", { method: "POST", body: JSON.stringify(pw) });
-          setPw({ current: "", new: "" });
-          setMsg("Password changed. Other devices were signed out.");
-          track("password_changed");
-          load();
-        } catch (e: any) { setMsg(e.message); }
-      }}>
-        <input type="password" required placeholder="Current password" autoComplete="current-password" value={pw.current}
-          onChange={(e) => setPw({ ...pw, current: e.target.value })} className="rounded-lg border border-line bg-surface px-3 py-2" />
-        <input type="password" required minLength={8} placeholder="New password (8+ characters)" autoComplete="new-password" value={pw.new}
-          onChange={(e) => setPw({ ...pw, new: e.target.value })} className="rounded-lg border border-line bg-surface px-3 py-2" />
-        <div><button className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-on-primary hover:bg-primary-2">Change password</button></div>
-        {msg && <p className="text-sm text-graphite" role="status">{msg}</p>}
-      </form>
-
-      <h3 className="mt-8 font-semibold">Signed-in devices</h3>
-      <ul className="mt-2 divide-y divide-line rounded-xl border border-line">
+    <Section title="Where it's open" sub="Browsers using this account right now.">
+      <ul className="divide-y divide-line rounded-xl border border-line">
         {sessions.map((s) => (
           <li key={s.id} className="flex flex-wrap items-center gap-3 px-4 py-3">
             <Laptop size={18} className="shrink-0 text-mute" />
             <div className="min-w-0 flex-1">
-              <div className="truncate text-[15px] font-medium">{describeAgent(s.user_agent)}{s.current && <span className="ml-2 rounded-full bg-marine-soft px-2 py-0.5 text-xs text-marine-ink">this device</span>}</div>
-              <div className="text-sm text-mute">Last active {fmtDate(s.last_seen_at)} · {s.remember ? "remembered for 30 days" : "until the browser closes"}</div>
+              <div className="truncate text-[15px] font-medium">{describeAgent(s.user_agent)}{s.current && <span className="ml-2 rounded-full bg-marine-soft px-2 py-0.5 text-xs text-marine-ink">this browser</span>}</div>
+              <div className="text-sm text-mute">Last active {fmtDate(s.last_seen_at)}</div>
             </div>
-            <button className="text-sm text-graphite underline" onClick={async () => {
-              await api(`/api/auth/sessions/${s.id}`, { method: "DELETE" });
-              if (s.current) onSignedOut(); else load();
-            }}>{s.current ? "Sign out" : "Sign out device"}</button>
           </li>
         ))}
       </ul>
-      {sessions.length > 1 && (
-        <button className="mt-3 text-sm font-medium underline" onClick={async () => { await api("/api/auth/sessions/revoke-others", { method: "POST" }); load(); }}>
-          Sign out all other devices
-        </button>
-      )}
+      <button className="mt-3 text-sm font-medium underline" onClick={async () => { await api("/api/auth/sessions/revoke-others", { method: "POST" }); load(); }}>
+        Close it everywhere else
+      </button>
     </Section>
+  );
+}
+
+const DETAIL_FIELDS: { key: string; label: string; placeholder?: string; type?: string }[] = [
+  { key: "first_name", label: "First name" }, { key: "last_name", label: "Last name" },
+  { key: "email", label: "Email", type: "email" }, { key: "phone", label: "Phone", type: "tel" },
+  { key: "country", label: "Country", placeholder: "United States" }, { key: "location", label: "City", placeholder: "San Francisco" },
+  { key: "linkedin", label: "LinkedIn", placeholder: "linkedin.com/in/…" }, { key: "github", label: "GitHub", placeholder: "github.com/…" },
+  { key: "website", label: "Website or portfolio" },
+  { key: "work_authorization", label: "Work authorization", placeholder: "e.g. US citizen; authorized to work in India" },
+  { key: "needs_sponsorship", label: "Need visa sponsorship?", placeholder: "Yes or No" },
+  { key: "relocation", label: "Open to relocating?", placeholder: "e.g. Yes, within the US" },
+  { key: "notice_period", label: "Notice period or start date", placeholder: "e.g. 4 weeks" },
+  { key: "how_heard", label: "How you usually hear about jobs", placeholder: "e.g. Company website" },
+];
+
+/** What application forms ask for every time; used only when you apply, and you see every value first. */
+function ApplicationDetails() {
+  const [d, setD] = useState<any>(null);
+  const [vals, setVals] = useState<Record<string, string>>({});
+  const [msg, setMsg] = useState<string | null>(null);
+  useEffect(() => { api("/api/profile/application").then((x) => { setD(x); setVals(x.details); }).catch(() => {}); }, []);
+  if (!d) return null;
+  return (
+    <section id="application" className="mt-6 scroll-mt-6 rounded-2xl border border-line bg-surface p-6">
+      <h2 className="font-display text-lg font-semibold">Application details</h2>
+      <p className="mt-0.5 text-sm text-graphite">What job applications ask for every time. Only used when you apply, and you see every value before anything is sent.</p>
+      <form className="mt-5 grid gap-4 md:grid-cols-2" onSubmit={async (e) => {
+        e.preventDefault(); setMsg(null);
+        try { const x = await api("/api/profile/application", { method: "PUT", body: JSON.stringify({ details: vals }) }); setD(x); setVals(x.details); setMsg("Saved."); }
+        catch (er: any) { setMsg(er.message); }
+      }}>
+        {DETAIL_FIELDS.map((f) => (
+          <label key={f.key} className="block"><span className="text-sm font-semibold">{f.label}</span>
+            <input type={f.type ?? "text"} value={vals[f.key] ?? ""} placeholder={f.placeholder} maxLength={300}
+              onChange={(e) => setVals({ ...vals, [f.key]: e.target.value })} className="mt-1.5 w-full rounded-lg border border-line bg-surface px-3 py-2" /></label>
+        ))}
+        <div className="flex items-center gap-3 md:col-span-2">
+          <button className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-on-primary hover:bg-primary-2">Save details</button>
+          {msg && <span className="text-sm text-graphite" role="status">{msg}</span>}
+        </div>
+      </form>
+      <div className="mt-6 flex flex-wrap items-center gap-3 border-t border-line pt-5">
+        <span className="text-sm font-semibold">Resume file</span>
+        <span className="text-sm text-graphite">{d.resume ? `${d.resume.name} · uploaded ${fmtDate(d.resume.uploaded_at)}` : "None yet: forms that ask for a resume need one"}</span>
+        <label className="ml-auto inline-flex cursor-pointer items-center gap-2 rounded-lg border border-line px-3 py-1.5 text-sm font-medium hover:bg-paper">
+          {d.resume ? "Replace" : "Upload"} resume
+          <input type="file" accept=".pdf,.doc,.docx,.txt,.rtf" className="sr-only" onChange={async (e) => {
+            const file = e.target.files?.[0]; if (!file) return;
+            const fd = new FormData(); fd.append("file", file);
+            try { const r = await api("/api/profile/application/resume", { method: "POST", body: fd }); setD({ ...d, resume: r }); }
+            catch (er: any) { setMsg(er.message); }
+          }} />
+        </label>
+      </div>
+    </section>
   );
 }
 
@@ -249,7 +283,7 @@ function describeAgent(ua: string): string {
 }
 
 function DeleteAccount({ onDeleted }: { onDeleted: () => void }) {
-  const [password, setPassword] = useState("");
+  const [typed, setTyped] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   if (!open) return <button className="inline-flex items-center gap-2 rounded-lg border border-coral/60 px-3 py-2 text-sm font-medium text-alarm hover:bg-coral-soft" onClick={() => setOpen(true)}><Trash2 size={15} /> Delete my account</button>;
@@ -257,18 +291,17 @@ function DeleteAccount({ onDeleted }: { onDeleted: () => void }) {
     <form className="grid max-w-md gap-3" onSubmit={async (e) => {
       e.preventDefault();
       try {
-        await api("/api/auth/me/delete", { method: "POST", body: JSON.stringify({ password }) });
+        await api("/api/auth/me/delete", { method: "POST", body: JSON.stringify({ confirm: typed.trim().toLowerCase() }) });
         onDeleted();
       } catch (e: any) { setErr(e.message); }
     }}>
-      <input type="password" required placeholder="Your password, to confirm" autoComplete="current-password" value={password}
-        onChange={(e) => setPassword(e.target.value)} className="rounded-lg border border-line bg-surface px-3 py-2" />
+      <label className="text-sm text-graphite">Type <span className="font-mono font-semibold text-ink">delete</span> to confirm
+        <input required value={typed} onChange={(e) => setTyped(e.target.value)} className="mt-1.5 w-full rounded-lg border border-line bg-surface px-3 py-2" /></label>
       <div className="flex gap-2">
-        <button className="rounded-lg bg-coral px-4 py-2 text-sm font-semibold text-white">Delete everything</button>
+        <button disabled={typed.trim().toLowerCase() !== "delete"} className="rounded-lg bg-coral px-4 py-2 text-sm font-semibold text-white disabled:opacity-40">Delete everything</button>
         <button type="button" className="px-3 py-2 text-sm text-graphite" onClick={() => setOpen(false)}>Cancel</button>
       </div>
       {err && <p className="text-sm text-alarm" role="alert">{err}</p>}
     </form>
   );
 }
-
