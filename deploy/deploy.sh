@@ -31,6 +31,12 @@ print("created deploy/.env.prod")
 PY
 fi
 
+# Settings added after the first deploy: append once, keeping existing secrets.
+grep -q '^BROWSER_PATH=' deploy/.env.prod || {
+  path="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
+  printf 'BROWSER_PATH=%s\nBROWSER_WS_URL=ws://browser:3000/%s\n' "$path" "$path" >> deploy/.env.prod
+}
+
 rsync -az --delete \
   --exclude .git --exclude node_modules --exclude .venv --exclude dist --exclude __pycache__ \
   --exclude 'backend/data' --exclude '.env' --exclude 'infra/fish-speech' --exclude 'infra/chatterbox' \

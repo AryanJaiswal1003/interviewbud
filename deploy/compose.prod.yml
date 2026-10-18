@@ -16,6 +16,7 @@ services:
     build: { context: ../backend }
     restart: unless-stopped
     env_file: .env.prod
+    networks: [default, browsing]
     volumes:
       - api_data:/app/data
       # Runs the code sandbox on the host's Docker (root-equivalent: this VM is dedicated to InterviewBud).
@@ -23,6 +24,15 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       tts: { condition: service_started }
+
+  browser:
+    build: { context: ., dockerfile: browser.Dockerfile }
+    restart: unless-stopped
+    environment:
+      BROWSER_PATH: ${BROWSER_PATH}
+    networks: [browsing]  # can reach the internet and the API, nothing else
+    shm_size: 1gb
+    mem_limit: 3g
 
   copilot:
     build: { context: ../copilot-runtime }
@@ -50,6 +60,10 @@ services:
       test: ["CMD-SHELL", "pg_isready -U interviewbud"]
       interval: 5s
       retries: 20
+
+networks:
+  default: {}
+  browsing: {}
 
 volumes:
   caddy_data:
