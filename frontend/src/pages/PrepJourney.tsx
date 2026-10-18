@@ -1,4 +1,6 @@
-import { ArrowLeft, Check, ChevronDown, ExternalLink, FileUp, Pencil, Play, Plus, Quote, RotateCcw, X } from "lucide-react";
+import { ArrowLeft, Check, ChevronDown, ExternalLink, FileUp, Keyboard, ListChecks, Mic, Pencil, Play, Plus, Quote, RotateCcw, X } from "lucide-react";
+import { FeedbackBody, SimilarJobs } from "../components/AfterInterview";
+import { ApplyStep } from "./Apply";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { RecPill, ScoreStrip } from "../components/ui";
@@ -6,10 +8,10 @@ import { track } from "../lib/analytics";
 import { api, fmtDate } from "../lib/api";
 import { PREP_STATUS } from "./Prep";
 
-type Step = "job" | "you" | "plan" | "practice" | "feedback";
+type Step = "job" | "you" | "plan" | "practice" | "feedback" | "apply";
 const STEPS: { key: Step; label: string }[] = [
   { key: "job", label: "The job" }, { key: "you", label: "About you" }, { key: "plan", label: "Plan" },
-  { key: "practice", label: "Practice" }, { key: "feedback", label: "Feedback" },
+  { key: "practice", label: "Practice" }, { key: "feedback", label: "Feedback" }, { key: "apply", label: "Apply" },
 ];
 const TRANSIENT = new Set(["intake", "planning"]);
 const NEXT_LABEL: Record<string, string> = {
@@ -33,7 +35,10 @@ function stepFor(status: string, d: any): Step {
 export default function PrepJourney() {
   const { id = "" } = useParams();
   const [d, setD] = useState<any>(null);
-  const [step, setStep] = useState<Step | null>(null);
+  const [step, setStepState] = useState<Step | null>(null);
+  // Follow the journey as it moves on (e.g. the posting finishes reading) until the person picks a step themselves.
+  const picked = useRef(false);
+  const setStep = (s: Step) => { picked.current = true; setStepState(s); };
   const [err, setErr] = useState<string | null>(null);
   const timer = useRef<number | undefined>(undefined);
 
@@ -41,7 +46,7 @@ export default function PrepJourney() {
     try {
       const x = await api(`/api/prep/${id}`);
       setD(x);
-      setStep((s) => s ?? stepFor(x.status, x));
+      setStepState((s) => (picked.current ? s : null) ?? stepFor(x.status, x));
       return x;
     } catch (e: any) {
       setErr(e.message);
@@ -122,7 +127,8 @@ export default function PrepJourney() {
         {step === "you" && <YouStep d={d} reload={load} goPlan={() => setStep("plan")} />}
         {step === "plan" && <PlanStep d={d} reload={load} goPractice={() => setStep("practice")} />}
         {step === "practice" && <PracticeStep d={d} reload={load} />}
-        {step === "feedback" && <FeedbackStep d={d} goPractice={() => setStep("practice")} />}
+        {step === "feedback" && <FeedbackStep d={d} goPractice={() => setStep("practice")} goApply={() => setStep("apply")} />}
+        {step === "apply" && <ApplyStep d={d} />}
       </div>
     </div>
   );
@@ -231,41 +237,97 @@ function JobStep({ d, reload }: { d: any; reload: () => void }) {
 }
 
 function YouStep({ d, reload, goPlan }: { d: any; reload: () => void; goPlan: () => void }) {
+  const nav = useNavigate();
   const open = d.questions.find((q: any) => q.status === "open");
   const answered = d.questions.filter((q: any) => q.status !== "open");
   const [answer, setAnswer] = useState("");
   const [busy, setBusy] = useState(false);
+  const [calling, setCalling] = useState<null | "voice" | "chat">(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [oneByOne, setOneByOne] = useState(false);
   const req = (rid: string) => (d.opportunity.extraction?.requirements || []).find((r: any) => r.id === rid);
   const supported = Object.values(d.coverage || {}).filter((c: any) => c.status === "supported").length;
   const total = Object.keys(d.coverage || {}).length;
+  const calls = d.practices.filter((p: any) => p.kind === "screening");
+  const send = async (text: string) => {
+    setBusy(true);
+    await api(`/api/prep/${d.id}/questions/${open.id}/answer`, { method: "POST", body: JSON.stringify({ answer: text }) });
+    track("prep_answered");
+    setAnswer("");
+    setBusy(false);
+    reload();
+  };
+  const call = async (mode: "voice" | "chat") => {
+    setCalling(mode); setErr(null);
+    try {
+      const r = await api<{ interview_id: string }>(`/api/prep/${d.id}/screening`, { method: "POST" });
+      track("screening_started", { mode });
+      nav(`/interview/${r.interview_id}${mode === "chat" ? "?mode=chat" : ""}`);
+    } catch (e: any) { setErr(e.message); setCalling(null); }
+  };
   return (
     <div className="grid gap-5 lg:grid-cols-[1fr_380px]">
       <div className="space-y-5">
-        {open ? (
-          <Card title="One question" sub={open.why}>
+        <section className="rounded-2xl border border-amber/50 bg-surface p-5">
+          <h2 className="font-display text-xl font-semibold">Skip the forms: just talk it through</h2>
+          <p className="mt-1 text-[15px] text-graphite">
+            A relaxed ten-minute call about your background and projects. The interviewer asks what this job and its
+            application need to know, and your answers fill in your profile and the application for you. You check
+            everything afterwards, then go straight into the technical round.
+          </p>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <button disabled={!!calling} onClick={() => call("voice")} className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2.5 font-semibold text-on-primary hover:bg-primary-2 disabled:opacity-50">
+              <Mic size={17} /> {calling === "voice" ? "Starting…" : "Start a voice call"}
+            </button>
+            <button disabled={!!calling} onClick={() => call("chat")} className="inline-flex items-center gap-2 rounded-lg border border-line px-4 py-2.5 font-medium hover:bg-paper disabled:opacity-50">
+              <Keyboard size={17} /> {calling === "chat" ? "Starting…" : "Chat by typing"}
+            </button>
+            {!oneByOne && open && (
+              <button onClick={() => setOneByOne(true)} className="inline-flex items-center gap-2 rounded-lg px-3 py-2.5 text-graphite hover:text-ink">
+                <ListChecks size={17} /> Answer short questions instead
+              </button>
+            )}
+          </div>
+          {err && <p className="mt-2 text-sm text-alarm">{err}</p>}
+          {calls.length > 0 && (
+            <ul className="mt-4 space-y-1 border-t border-line pt-3 text-sm">
+              {calls.map((c: any) => (
+                <li key={c.id} className="flex flex-wrap items-center gap-2">
+                  <span className="text-graphite">Screening call, {fmtDate(c.created_at)}:</span>
+                  {c.status === "scored" ? <span>{c.captured} of {c.items_total} answered</span> : <span className="text-graphite">{c.status === "completed" ? "writing it up…" : "not finished"}</span>}
+                  {["ready", "live"].includes(c.status) && <Link className="underline" to={`/interview/${c.id}`}>Rejoin</Link>}
+                  {c.next_interview_id && <Link className="font-semibold underline" to={`/interview/${c.next_interview_id}`}>Technical round</Link>}
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+        {(oneByOne || !open) && (open ? (
+          <Card title="A quick question" sub={open.why}>
             <p className="font-display text-xl leading-snug">{open.question}</p>
             {req(open.requirement_id) && <p className="mt-1 text-sm text-mute">About {open.requirement_id}: {req(open.requirement_id).text}</p>}
-            <form className="mt-4" onSubmit={async (e) => {
-              e.preventDefault();
-              setBusy(true);
-              await api(`/api/prep/${d.id}/questions/${open.id}/answer`, { method: "POST", body: JSON.stringify({ answer }) });
-              track("prep_answered");
-              setAnswer("");
-              setBusy(false);
-              reload();
-            }}>
-              <textarea required rows={4} value={answer} onChange={(e) => setAnswer(e.target.value)} placeholder="Answer in your own words. Specifics help: what you did, with what, how much."
+            {open.quick_replies?.length > 0 && (
+              <div className="mt-4 flex flex-wrap gap-2">
+                {open.quick_replies.map((r: string) => (
+                  <button key={r} disabled={busy} onClick={() => send(r)} className="rounded-full border border-line bg-paper px-4 py-2 text-[15px] font-medium hover:border-ink/40 disabled:opacity-50">{r}</button>
+                ))}
+              </div>
+            )}
+            <form className="mt-4" onSubmit={(e) => { e.preventDefault(); send(answer); }}>
+              <textarea required rows={open.quick_replies?.length ? 2 : 3} value={answer} onChange={(e) => setAnswer(e.target.value)}
+                placeholder={open.quick_replies?.length ? "Or say it in your own words" : "A sentence or two is plenty: what you did, with what."}
                 className="w-full rounded-lg border border-line bg-surface px-3 py-2.5" />
               <div className="mt-3 flex flex-wrap gap-2">
                 <button disabled={busy} className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-on-primary disabled:opacity-50">{busy ? "Saving…" : "Save answer"}</button>
-                <button type="button" className="rounded-lg border border-line px-3 py-2 text-sm" onClick={async () => { await api(`/api/prep/${d.id}/questions/${open.id}/skip`, { method: "POST" }); reload(); }}>Skip this one</button>
+                <button type="button" className="rounded-lg border border-line px-3 py-2 text-sm" onClick={async () => { await api(`/api/prep/${d.id}/questions/${open.id}/skip`, { method: "POST" }); reload(); }}>Skip</button>
+                {d.queued_questions > 0 && <span className="self-center text-sm text-mute">{d.queued_questions} more after this</span>}
               </div>
             </form>
           </Card>
         ) : (
           <Card title={d.pending_action.startsWith("Answer") ? "Thinking of the next question…" : "No more questions for now"}
             sub={`${supported} of ${total} requirements are backed by something you've told us.`} />
-        )}
+        ))}
         <Card title="Ready when you are" sub="You can build the plan at any point; anything still unknown becomes something to practise.">
           <button className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-on-primary hover:bg-primary-2" onClick={async () => {
             await api(`/api/prep/${d.id}/plan`, { method: "POST", body: JSON.stringify({}) });
@@ -302,6 +364,7 @@ function Facts({ d, reload }: { d: any; reload: () => void }) {
           <li key={f.id} className="rounded-xl border border-line p-3">
             <div className="flex items-center gap-2 text-sm">
               <span className="min-w-0 flex-1 truncate font-semibold">{f.topic}</span>
+              {f.source === "screening" && <span className="text-xs text-mute">from your call</span>}
               <span className={"rounded-full px-2 py-0.5 text-xs " + (f.status === "confirmed" ? "bg-marine-soft text-marine-ink" : "bg-amber-soft")}>{f.status === "confirmed" ? "confirmed" : "suggested"}</span>
             </div>
             {editing === f.id ? (
@@ -443,7 +506,7 @@ function PracticeStep({ d, reload }: { d: any; reload: () => void }) {
           <ul className="divide-y divide-line">
             {d.practices.map((p: any, i: number) => (
               <li key={p.id} className="flex flex-wrap items-center gap-3 py-3">
-                <span className="w-24 text-sm text-mute">#{d.practices.length - i} · v{p.plan_version}</span>
+                <span className="w-28 text-sm text-mute">{p.kind === "screening" ? "Screening call" : `#${d.practices.length - i} · v${p.plan_version}`}</span>
                 <span className="min-w-0 flex-1 text-sm">{fmtDate(p.created_at)} · {p.duration_min} min</span>
                 {p.recommendation ? <ScoreStrip scores={p.scores} size="sm" /> : null}
                 <RecPill rec={p.recommendation} status={p.status} />
@@ -459,40 +522,30 @@ function PracticeStep({ d, reload }: { d: any; reload: () => void }) {
   );
 }
 
-function FeedbackStep({ d, goPractice }: { d: any; goPractice: () => void }) {
+function FeedbackStep({ d, goPractice, goApply }: { d: any; goPractice: () => void; goApply: () => void }) {
   const done = d.practices.filter((p: any) => d.feedback[p.id]);
   const pending = d.practices.filter((p: any) => !d.feedback[p.id] && ["completed", "scored"].includes(p.status));
-  if (!done.length) return <Card title={pending.length ? "Writing your feedback…" : "No feedback yet"} sub={pending.length ? "Scoring the interview and pulling out what to work on. A few minutes." : "Finish a practice interview to get feedback here."} />;
   return (
     <div className="space-y-6">
-      {done.map((p: any) => {
-        const f = d.feedback[p.id];
-        return (
-          <section key={p.id} className="rounded-2xl border border-line bg-surface p-6">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div><h2 className="font-display text-lg font-semibold">Practice on {fmtDate(p.created_at)}</h2><p className="text-sm text-graphite">Plan v{p.plan_version} · {p.duration_min} min</p></div>
-              <div className="flex items-center gap-3"><ScoreStrip scores={p.scores} /><RecPill rec={p.recommendation} status={p.status} /></div>
+      {!done.length && <Card title={pending.length ? "Writing your feedback…" : "No feedback yet"} sub={pending.length ? "Scoring the interview and pulling out what to work on. A few minutes." : "Finish a practice interview or a screening call to get feedback here."} />}
+      {done.map((p: any) => (
+        <section key={p.id} className="rounded-2xl border border-line bg-surface p-6">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="font-display text-lg font-semibold">{p.kind === "screening" ? "Screening call" : "Practice"} on {fmtDate(p.created_at)}</h2>
+              <p className="text-sm text-graphite">{p.kind === "screening" ? `${p.captured} of ${p.items_total} questions answered` : `Plan v${p.plan_version} · ${p.duration_min} min`}</p>
             </div>
-            <div className="mt-5 grid gap-5 md:grid-cols-2">
-              <List title="What went well" items={f.strengths} tone="text-marine-ink" />
-              <List title="Gaps" items={f.gaps} tone="text-alarm" />
-            </div>
-            <div className="mt-5"><List title="How to answer better" items={f.improvements} tone="" /></div>
-            <div className="mt-5">
-              <h3 className="font-semibold">Practise next</h3>
-              <ul className="mt-2 space-y-2">{f.next_topics.map((t: any, i: number) => <li key={i} className="text-[15px]"><span className="font-medium">{t.topic}</span> <span className="text-mute">({t.requirement_ids.join(", ")})</span><div className="text-sm text-graphite">{t.why}</div></li>)}</ul>
-            </div>
-            <div className="mt-5 flex flex-wrap gap-3 text-sm">
-              <Link className="underline" to={`/dashboard/${p.id}`}>Full transcript and scorecard</Link>
-              <button className="font-semibold underline" onClick={goPractice}>Practise again</button>
-            </div>
-          </section>
-        );
-      })}
+            {p.kind !== "screening" && <div className="flex items-center gap-3"><ScoreStrip scores={p.scores} /><RecPill rec={p.recommendation} status={p.status} /></div>}
+          </div>
+          <div className="mt-5"><FeedbackBody f={d.feedback[p.id]} /></div>
+          <div className="mt-5 flex flex-wrap gap-3 text-sm">
+            <Link className="underline" to={`/dashboard/${p.id}`}>Full transcript{p.kind === "screening" ? "" : " and scorecard"}</Link>
+            <button className="font-semibold underline" onClick={goPractice}>Practise again</button>
+            <button className="font-semibold underline" onClick={goApply}>Apply to this job</button>
+          </div>
+        </section>
+      ))}
+      <SimilarJobs prepId={d.id} />
     </div>
   );
-}
-
-function List({ title, items, tone }: { title: string; items: string[]; tone: string }) {
-  return <div><h3 className={`font-semibold ${tone}`}>{title}</h3><ul className="mt-2 list-disc space-y-1.5 pl-5 text-[15px]">{items.map((x, i) => <li key={i}>{x}</li>)}</ul></div>;
 }
