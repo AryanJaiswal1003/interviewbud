@@ -56,14 +56,18 @@ class RequirementCoverage(BaseModel):
 
 class NextQuestion(BaseModel):
     requirement_id: str
-    question: str = Field(description="One short, friendly question; asks for facts, never assumes them")
-    why: str = Field(description="One short sentence the user sees: why this matters for the role")
+    question: str = Field(description="At most 15 words, one thing, plain and friendly; asks for facts, never "
+                                      "assumes them")
+    why: str = Field(description="At most 12 words the user sees: why this matters for this role")
+    quick_replies: list[str] = Field(description="0-4 tap-to-answer options (each under 6 words) when the answer is "
+                                                 "naturally one of a few (years ranges, yes/no, levels); empty for "
+                                                 "open questions")
 
 
 class CoverageResult(BaseModel):
     coverage: list[RequirementCoverage]
-    next_question: NextQuestion | None = Field(
-        description="The single most useful question to ask next, or null if nothing important is missing")
+    next_questions: list[NextQuestion] = Field(
+        description="Up to 3 questions to ask next, most important first; empty if nothing important is missing")
 
 
 class ResumeFact(BaseModel):

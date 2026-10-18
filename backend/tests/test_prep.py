@@ -14,7 +14,6 @@ from app.db import Interview, PrepPlan, ProfileFactRevision, SessionLocal, User
 from app.main import app
 from app.prep import fetcher, service
 
-PW = "correct horse battery"
 JOB = ("Senior Backend Engineer at Example Co. You will design APIs and own services end to end. "
        "Requirements: 5+ years of Python; experience with Postgres; you have shipped distributed systems. "
        "Nice to have: Kafka. ") * 3
@@ -28,7 +27,7 @@ async def _clean(monkeypatch):
     monkeypatch.setattr(service, "spawn", lambda coro: (spawned.append(coro.__qualname__), coro.close()))
     yield spawned
     async with SessionLocal() as db:
-        await db.execute(delete(User).where(User.email.like("preptest-%@example.com")))
+        await db.execute(delete(User).where(User.display_name.like("preptest-%")))
         await db.commit()
 
 
@@ -37,7 +36,7 @@ def client():
 
 
 async def signup(c) -> str:
-    r = await c.post("/api/auth/signup", json={"email": f"preptest-{uuid.uuid4().hex[:8]}@example.com", "password": PW})
+    r = await c.post("/api/auth/start", json={"name": f"preptest-{uuid.uuid4().hex[:8]}"})
     return r.json()["id"]
 
 
