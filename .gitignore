@@ -1,0 +1,29 @@
+.env
+node_modules/
+dist/
+.venv/
+__pycache__/
+*.pyc
+backend/data/*.jsonl
+.pytest_cache/
+backend/data/.secret_key
+backend/data/dev_test_account.json
+backend/data/dev_prep_account.json
+deploy/.env.prod
+
+# Never commit environment files of any kind (secrets, examples included)
+.env
+.env.*
+**/.env
+**/.env.*
+
+# Local data, models and runtime state
+backend/data/
+infra/pocket-tts/references/
+infra/pocket-tts/.venv/
+infra/chatterbox/.venv/
+infra/fish-speech/checkpoints/
+infra/fish-speech/references/
+infra/fish-speech/fish-speech/
+*.log
+.DS_Store

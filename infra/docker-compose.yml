@@ -1,0 +1,18 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: interviewbud-postgres
+    environment:
+      POSTGRES_USER: interviewbud
+      POSTGRES_PASSWORD: interviewbud
+      POSTGRES_DB: interviewbud
+    ports:
+      - "127.0.0.1:5544:5432"  # local only: the dev password is not a secret
+    volumes:
+      - interviewbud-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U interviewbud"]
+      interval: 3s
+      retries: 20
+volumes:
+  interviewbud-pg:
