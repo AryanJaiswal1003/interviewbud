@@ -113,6 +113,7 @@ def _summary_row(iv: Interview, cand: Candidate) -> dict:
         "candidate": cand.name or cand.resume_filename,
         "headline": (cand.profile or {}).get("headline", ""),
         "role": iv.role,
+        "kind": iv.kind or "interview",
         "seniority": iv.seniority,
         "status": iv.status,
         "recommendation": (iv.reviewer_overrides or {}).get("recommendation") or card.get("recommendation"),
@@ -221,7 +222,11 @@ async def end_interview(interview_id: UUID, db: AsyncSession = Depends(get_db),
     if iv.status == "live":
         iv.status = "completed"
         await db.commit()
-        asyncio.create_task(scorecard.finalize(iv.id))
+        if iv.kind == "screening":
+            from ..prep import screening
+            asyncio.create_task(screening.finalize(iv.id))
+        else:
+            asyncio.create_task(scorecard.finalize(iv.id))
     return {"ok": True}
 
 
@@ -231,7 +236,15 @@ async def rescore(interview_id: UUID, db: AsyncSession = Depends(get_db),
     iv = await owned(db, interview_id, user)
     if iv.status not in ("completed", "scored"):
         raise HTTPException(409, "interview not finished")
-    asyncio.create_task(scorecard.finalize(iv.id))
+    if iv.kind == "screening":
+        from ..prep import screening
+        if iv.status == "scored":
+            raise HTTPException(409, "already written up")
+        iv.error = ""
+        await db.commit()
+        asyncio.create_task(screening.finalize(iv.id))
+    else:
+        asyncio.create_task(scorecard.finalize(iv.id))
     return {"ok": True}
 
 

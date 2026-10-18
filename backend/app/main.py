@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api import agui, analytics, catalog, interviews, prep, ws
+from .api import agui, analytics, apply, catalog, interviews, prep, ws
 from .api import auth as auth_api
 from .auth import OriginGuard, SecurityHeaders
 from .coding import dataset, sandbox
@@ -25,13 +25,17 @@ async def resume_interrupted_work() -> dict:
     from .api.interviews import prepare
     from .db import Interview, PrepSession, SessionLocal
     from .evaluation import scorecard
+    from .prep import screening
     from .prep import service as prep_service
 
     counts = {"score": 0, "plan_interview": 0, "intake": 0, "prep_plan": 0}
     async with SessionLocal() as db:
         for iv in (await db.scalars(select(Interview).where(Interview.status.in_(("completed", "planning",
                                                                                      "created"))))).all():
-            if iv.status == "completed":
+            if iv.status == "completed" and iv.kind == "screening":
+                prep_service.spawn(screening.finalize(iv.id))
+                counts["score"] += 1
+            elif iv.status == "completed":
                 prep_service.spawn(scorecard.finalize(iv.id))
                 counts["score"] += 1
             elif iv.prep_id:
@@ -85,6 +89,7 @@ app.include_router(auth_api.router)
 app.include_router(analytics.router)
 app.include_router(interviews.router)
 app.include_router(prep.router)
+app.include_router(apply.router)
 app.include_router(catalog.router)
 app.include_router(ws.router)
 app.include_router(agui.router)

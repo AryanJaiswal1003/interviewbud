@@ -89,6 +89,8 @@ async def run_intake(prep_id: UUID) -> None:
                 opp.final_url, opp.source_text, opp.title = page.final_url, page.text[:60000], page.title[:300]
                 await db.commit()
             await _extract(db, opp, prep)
+            if opp.fetch_status == "ok":
+                await _read_application_early(db, prep, opp)  # in the background, alongside the coverage check
             await refresh_coverage(db, prep)
         except Exception as e:
             log.exception("intake failed")
@@ -97,12 +99,23 @@ async def run_intake(prep_id: UUID) -> None:
             await db.commit()
 
 
+async def _read_application_early(db: AsyncSession, prep: PrepSession, opp: Opportunity) -> None:
+    """Read the application form now (known job boards only), so the screening call can cover its questions.
+    Reading only: nothing is filled or sent until the candidate asks."""
+    from ..apply import service as apply
+    from ..db import Application
+    ats, _ = apply.apply_url(opp.final_url or opp.source_url)
+    if ats == "generic" or await db.scalar(select(Application.id).where(Application.prep_id == prep.id).limit(1)):
+        return
+    await apply.start(db, prep)
+
+
 async def _extract(db: AsyncSession, opp: Opportunity, prep: PrepSession) -> None:
     prep.status, prep.pending_action = "intake", "Reading the posting"
     await db.commit()
     ex = await llm.structured(JobExtraction, EXTRACT_SYSTEM,
                               f"SOURCE: {opp.final_url or opp.source_url or 'pasted text'}\n\n"
-                              + llm.untrusted("job page", opp.source_text[:40000]), temperature=0, reasoning_effort=get_settings().prep_reasoning_effort)
+                              + llm.untrusted("job page", opp.source_text[:25000]), temperature=0, reasoning_effort=get_settings().prep_reasoning_effort)
     if not ex.is_job_posting:
         opp.fetch_status, opp.fetch_error = "needs_text", ex.not_posting_reason or "That doesn't look like a job posting"
         prep.status, prep.pending_action = "needs_text", "Paste the job description: that page wasn't a job posting"
@@ -126,16 +139,25 @@ async def _extract(db: AsyncSession, opp: Opportunity, prep: PrepSession) -> Non
 
 
 # ---------------- 2. candidate context ----------------
-COVERAGE_SYSTEM = """You compare a job's requirements with what we know about the candidate, then pick the one most
-useful question to ask next.
+COVERAGE_SYSTEM = """You compare a job's requirements with what we know about the candidate, then choose the next
+few questions to ask them.
 - Only CONFIRMED facts count as evidence. A SUGGESTED fact (e.g. drafted from a resume) makes a requirement
   needs_clarification at best: the user hasn't confirmed it.
 - supported: a confirmed fact clearly shows it. needs_clarification: related evidence but incomplete or unconfirmed.
   unknown: nothing relevant.
 - Never assume or invent anything about the candidate.
-- next_question: one short, friendly question about the most important must-have requirement that isn't supported,
-  asking for specifics (what they did, with what, how much). Prefer requirements not asked about before. Ask about
-  a suggested fact by asking them to confirm or correct it. null if every must-have is supported or was already asked."""
+- next_questions: up to 3, in this order of importance:
+  1. must-have requirements with no evidence, the core technical ones first;
+  2. deal-breakers the posting states (location or on-site days, years of experience, required degree or licence,
+     work authorization only if the posting asks about it);
+  3. must-haves with weak evidence; then nice-to-haves.
+- Each question is SHORT (at most 15 words), about ONE thing, and sounds like a friendly recruiter, not a form:
+    "What have you built with React recently?"   not   "Could you describe your experience with React, including
+    the scale of applications and your specific contributions?"
+    "How many years have you worked with Python?" with quick_replies ["Under 2", "2-4 years", "5+ years"].
+- Give quick_replies when the answer is naturally one of a few options; leave them empty for open questions.
+- Ask about a suggested fact by asking them to confirm or correct it. Don't repeat anything already asked or
+  already answered by a confirmed fact. Empty if every must-have is supported or was already asked."""
 
 
 def fact_view(f: ProfileFact) -> dict:
@@ -162,7 +184,8 @@ async def refresh_coverage(db: AsyncSession, prep: PrepSession) -> None:
         "REQUIREMENTS:\n" + "\n".join(f"- {r['id']} ({'must' if r['must_have'] else 'nice'}, {r['category']}): "
                                       f"{r['text']}" for r in reqs)
         + "\n\nALREADY ASKED (don't repeat): " + llm.dumps([{"req": q.requirement_id, "q": q.question,
-                                                             "status": q.status} for q in asked])
+                                                             "status": q.status} for q in asked
+                                                            if q.status != "queued"])
         + "\n\nCANDIDATE FACTS:\n"
         + llm.untrusted("candidate facts", "\n".join(f"- id={f.id} [{f.status.upper()}] {f.topic}: {f.value}"
                                                      for f in facts) or "(none yet)"),
@@ -175,12 +198,23 @@ async def refresh_coverage(db: AsyncSession, prep: PrepSession) -> None:
     for rid, c in prep.coverage.items():  # supported needs at least one confirmed fact behind it
         if c["status"] == "supported" and not c["fact_ids"]:
             c["status"] = "needs_clarification"
-    nq = res.next_question
-    if open_q is None and nq and nq.requirement_id in valid_ids:
-        db.add(PrepQuestion(prep_id=prep.id, requirement_id=nq.requirement_id, question=nq.question, why=nq.why))
+    # The first new question goes on screen; the rest wait in a queue so the next one appears instantly after an
+    # answer (while coverage is re-checked in the background, which may replace the queue).
+    for q in asked:
+        if q.status == "queued":
+            await db.delete(q)
+    has_open = open_q is not None
+    seen = {q.question.strip().lower() for q in asked if q.status != "queued"}
+    for nq in res.next_questions[:3]:
+        if nq.requirement_id not in valid_ids or nq.question.strip().lower() in seen:
+            continue
+        db.add(PrepQuestion(prep_id=prep.id, requirement_id=nq.requirement_id, question=nq.question.strip(),
+                            why=nq.why, quick_replies=[r[:60] for r in nq.quick_replies[:4] if r.strip()],
+                            status="queued" if has_open else "open"))
+        has_open = True
     if prep.status in ("intake", "context", "needs_text", "failed"):
         prep.status = "context"
-    prep.pending_action = ("Answer the next question, or build your plan" if (open_q or nq)
+    prep.pending_action = ("Answer the next question, or build your plan" if has_open
                            else "Build your preparation plan")
     prep.updated_at = now()
     await db.commit()
@@ -195,8 +229,17 @@ async def answer_question(db: AsyncSession, prep: PrepSession, q: PrepQuestion, 
     db.add(fact)
     await db.flush()
     q.answer, q.status, q.fact_id, q.answered_at = answer.strip(), "answered", fact.id, now()
+    await promote_next(db, prep.id)
     await db.commit()
     return fact
+
+
+async def promote_next(db: AsyncSession, prep_id: UUID) -> None:
+    """Show the next queued question right away (the background coverage check may refine the queue later)."""
+    nxt = await db.scalar(select(PrepQuestion).where(PrepQuestion.prep_id == prep_id, PrepQuestion.status == "queued")
+                          .order_by(PrepQuestion.id).limit(1))
+    if nxt:
+        nxt.status = "open"
 
 
 async def edit_fact(db: AsyncSession, fact: ProfileFact, *, value: str | None, status: str | None,
@@ -317,13 +360,13 @@ def _focus_text(opp: Opportunity, plan: dict) -> str:
 async def start_practice(db: AsyncSession, prep: PrepSession, user: User, plan: PrepPlan, duration: int) -> Interview:
     opp = await db.get(Opportunity, prep.opportunity_id)
     facts = [f for f in await user_facts(db, prep.owner_id) if f.status == "confirmed"]
-    name = user.display_name or user.email.split("@")[0]
+    name = user.display_name or (user.email or "there").split("@")[0]
     profile = {"name": name, "preferred_name": name.split()[0], "headline": user.headline,
                "confirmed_facts": [{"id": f.id, "topic": f.topic, "value": f.value} for f in facts],
                "claims_to_verify": [{"claim": f"{f.topic}: {f.value}", "source": "candidate's own answer"}
                                     for f in facts[:12]],
                "conversation_hooks": [f.value for f in facts[:3]]}
-    cand = Candidate(name=name, email=user.email, profile=profile, resume_filename="(preparation profile)",
+    cand = Candidate(name=name, email=user.email or "", profile=profile, resume_filename="(preparation profile)",
                      resume_text="\n".join(f"{f.topic}: {f.value}" for f in facts))
     db.add(cand)
     await db.flush()
@@ -381,7 +424,8 @@ async def review_practice(db: AsyncSession, prep: PrepSession, iv: Interview, tu
     recs = dict(prep.recommendations or {})
     recs[str(iv.id)] = data
     prep.recommendations = recs
-    prep.status, prep.pending_action = "reviewed", "Practise again, or revise your plan"
+    if iv.kind != "screening":  # the screening hands over to the technical round, which sets its own status
+        prep.status, prep.pending_action = "reviewed", "Practise again, or revise your plan"
     prep.updated_at = now()
     await db.commit()
     return data

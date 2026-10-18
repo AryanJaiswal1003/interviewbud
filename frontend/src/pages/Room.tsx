@@ -1,8 +1,9 @@
 import { CopilotChat, CopilotKit, useAgentContext, useFrontendTool } from "@copilotkit/react-core/v2";
 import "@copilotkit/react-core/v2/styles.css";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link, useParams } from "react-router-dom";
-import { Captions, MessageSquareText, Mic, MicOff, PhoneOff, Video, VideoOff, Volume2 } from "lucide-react";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Captions, Check, CircleDashed, Keyboard, MessageSquareText, Mic, MicOff, PhoneOff, Quote, Send, Video, VideoOff, Volume2 } from "lucide-react";
+import { FeedbackBody, SimilarJobs, type Review } from "../components/AfterInterview";
 import { z } from "zod";
 import { CodePanel } from "../components/CodePanel";
 import { PhaseTimeline } from "../components/PhaseTimeline";
@@ -11,7 +12,7 @@ import { api } from "../lib/api";
 import { playPreview } from "../lib/audio";
 import { track } from "../lib/analytics";
 import { useAgentToken, useAuth } from "../lib/auth";
-import { useInterview } from "../lib/useInterview";
+import { useInterview, type CaptureItem } from "../lib/useInterview";
 
 type Panel = "code" | "whiteboard" | "notes";
 
@@ -52,7 +53,7 @@ export default function Room() {
         }}>Try again</button>
       </Centered>
     );
-  if (["completed", "scored"].includes(info.status) && !info.live) return <Finished id={id} prepId={info.prep_id} />;
+  if (["completed", "scored"].includes(info.status) && !info.live) return <Finished id={id} prepId={info.prep_id} kind={info.kind} />;
 
   return (
     <CopilotKit runtimeUrl="/api/copilotkit" agentId="interviewer" properties={{ interviewId: id, agentToken }} enableInspector={false}>
@@ -98,54 +99,162 @@ function Preparing({ info }: { info: any }) {
   );
 }
 
-function Finished({ id, prepId }: { id: string; prepId?: string | null }) {
+function Finished({ id, prepId, kind }: { id: string; prepId?: string | null; kind?: string }) {
+  if (kind === "screening") return <ScreeningFinished id={id} prepId={prepId} />;
+  return <InterviewFinished id={id} prepId={prepId} />;
+}
+
+/** Poll an endpoint until `done` says the background work is finished. */
+function usePoll<T>(url: string | null, done: (x: T) => boolean, every = 4000) {
+  const [data, setData] = useState<T | null>(null);
+  useEffect(() => {
+    if (!url) return;
+    let stop = false;
+    let t: number | undefined;
+    const load = async () => {
+      try {
+        const x = await api<T>(url);
+        if (stop) return;
+        setData(x);
+        if (!done(x)) t = window.setTimeout(load, every);
+      } catch {
+        if (!stop) t = window.setTimeout(load, every * 2);
+      }
+    };
+    load();
+    return () => { stop = true; window.clearTimeout(t); };
+  }, [url]); // eslint-disable-line react-hooks/exhaustive-deps
+  return data;
+}
+
+function ScreeningFinished({ id, prepId }: { id: string; prepId?: string | null }) {
+  const nav = useNavigate();
+  const [attempt, setAttempt] = useState(0);
+  const iv = usePoll<any>(`/api/interviews/${id}?a=${attempt}`, (x) => (x.status === "scored" && (x.scorecard?.next_interview_id || x.scorecard?.next_error || !x.prep_id)) || (x.status === "completed" && !!x.error), 3000);
+  const failed = iv?.status === "completed" && iv?.error;
+  const next = iv?.scorecard?.next_interview_id;
+  const nextIv = usePoll<any>(next ? `/api/interviews/${next}` : null, (x) => !["created", "planning"].includes(x.status), 3000);
+  const items: any[] = iv?.plan?.items ?? [];
+  const captured = iv?.scorecard?.captured ?? {};
+  const capturedDone = iv?.status === "scored";
+  const ready = nextIv && !["created", "planning"].includes(nextIv.status);
+  return (
+    <div className="min-h-full overflow-y-auto bg-call px-6 py-12 text-white">
+      <div className="mx-auto w-full max-w-3xl">
+        <h1 className="font-display text-3xl font-semibold">Thanks, that's the screening call done</h1>
+        {failed && (
+          <p className="mt-3 rounded-lg bg-coral/20 px-4 py-2.5 text-white">
+            Writing it up didn't work this time ({iv.error}).{" "}
+            <button className="font-semibold underline" onClick={async () => { await api(`/api/interviews/${id}/rescore`, { method: "POST" }); setAttempt((a) => a + 1); }}>Try again</button>
+          </p>
+        )}
+        <p className="mt-2 text-white/70">
+          {capturedDone ? "Here's what we took from it. It's saved to your profile and your application; correct anything on your preparation page."
+            : "Writing up what you said: matching your answers to the job and the application form…"}
+        </p>
+        <div className="mt-6 rounded-2xl bg-white/[.05] p-5">
+          <ul className="space-y-3">
+            {items.map((it) => {
+              const c = captured[it.id];
+              return (
+                <li key={it.id} className="flex gap-3">
+                  <span className={"mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full " + (c ? "bg-marine" : "bg-white/10")}>
+                    {c ? <Check size={13} /> : <CircleDashed size={13} className="text-white/40" />}
+                  </span>
+                  <div className="min-w-0">
+                    <div className="text-sm text-white/60">{it.kind === "application" ? "Application question" : "About the role"} · {it.ask}</div>
+                    {c ? <div className="text-[15px]">{c.answer} <span className="text-sm text-white/45 italic">“{c.quote}”</span></div>
+                      : <div className="text-sm text-white/45">{capturedDone ? "Not covered: you can add it on your preparation page." : "…"}</div>}
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+        <div className="mt-6 flex flex-wrap items-center gap-3">
+          {iv?.scorecard?.next_error ? (
+            <p className="text-coral">Setting up the technical round didn't work: {iv.scorecard.next_error}. Start it from your preparation page.</p>
+          ) : ready ? (
+            <button onClick={() => nav(`/interview/${next}`)} className="rounded-full bg-amber px-6 py-3 font-semibold text-onaccent hover:brightness-105">
+              Start the technical round
+            </button>
+          ) : (
+            <span className="rounded-full bg-white/10 px-5 py-2.5 text-white/80">Preparing your technical round… about a minute</span>
+          )}
+          {prepId && <Link to={`/prep/${prepId}`} className="text-white/75 underline">Review on your preparation page</Link>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function InterviewFinished({ id, prepId }: { id: string; prepId?: string | null }) {
   const [rating, setRating] = useState<number | null>(null);
   const [comment, setComment] = useState("");
   const [sent, setSent] = useState(false);
+  const prep = usePoll<any>(prepId ? `/api/prep/${prepId}` : null, (x) => !!x.feedback?.[id], 5000);
+  const review: Review | undefined = prep?.feedback?.[id];
   return (
-    <Centered>
-      <div className="w-full max-w-md text-left">
-        <h1 className="font-display text-3xl font-semibold">Thanks, that's the interview done</h1>
-        <p className="mt-2 text-white/70">A person reviews every AI-led interview before any decision. How did this one feel?</p>
-        {prepId && (
-          <Link to={`/prep/${prepId}`} className="mt-4 inline-block rounded-full bg-amber px-5 py-2 font-semibold text-onaccent">
-            Back to your preparation: feedback appears there in a few minutes
-          </Link>
-        )}
-        {sent ? (
-          <p className="mt-6 font-medium text-marine-soft">Thanks. Your feedback goes into how Alex runs future interviews.</p>
-        ) : (
-          <form className="mt-6 space-y-5" onSubmit={async (e) => {
-            e.preventDefault();
-            await api(`/api/interviews/${id}/feedback`, { method: "POST", body: JSON.stringify({ rating, comment }) });
-            setSent(true);
-          }}>
-            <fieldset>
-              <legend className="text-sm font-medium text-white/85">Overall experience</legend>
-              <div className="mt-2 flex gap-2">
-                {[1, 2, 3, 4, 5].map((n) => (
-                  <button type="button" key={n} onClick={() => setRating(n)} aria-pressed={rating === n}
-                    className={"h-11 w-11 rounded-full text-sm font-semibold " + (rating === n ? "bg-amber text-onaccent" : "bg-call-tile hover:bg-call-line")}>
-                    {n}
-                  </button>
-                ))}
-              </div>
-            </fieldset>
-            <label className="block text-sm font-medium text-white/85">
-              Anything the interviewer could do better?
-              <textarea className="mt-1.5 w-full rounded-lg border border-call-line bg-call-2 p-3 font-normal text-white" rows={3}
-                value={comment} onChange={(e) => setComment(e.target.value)} />
-            </label>
-            <button className="rounded-full bg-amber px-6 py-2.5 font-semibold text-onaccent disabled:opacity-40" disabled={rating === null}>Send feedback</button>
-          </form>
-        )}
+    <div className="min-h-full overflow-y-auto bg-call px-6 py-12 text-white">
+      <div className="mx-auto grid w-full max-w-5xl gap-8 lg:grid-cols-[1fr_320px]">
+        <div className="min-w-0 space-y-6">
+          <div>
+            <h1 className="font-display text-3xl font-semibold">Thanks, that's the interview done</h1>
+            <p className="mt-2 text-white/70">A person reviews every AI-led interview before any decision.</p>
+          </div>
+          {prepId && (
+            <section className="rounded-2xl bg-surface p-6 text-ink">
+              <h2 className="font-display text-xl font-semibold">Your feedback</h2>
+              {review ? <div className="mt-4"><FeedbackBody f={review} /></div>
+                : <p className="mt-2 text-graphite">Scoring the interview and pulling out what to work on, with quotes from what you said. A couple of minutes; this page updates by itself.</p>}
+              <Link to={`/prep/${prepId}`} className="mt-5 inline-block text-sm font-semibold underline">Back to your preparation</Link>
+            </section>
+          )}
+          {prepId && <SimilarJobs prepId={prepId} />}
+          {!prepId && <Link to={`/dashboard/${id}`} className="inline-block rounded-full bg-amber px-5 py-2 font-semibold text-onaccent">See the transcript and scorecard</Link>}
+        </div>
+        <aside className="self-start rounded-2xl bg-white/[.05] p-5">
+          <h2 className="font-semibold">How did this one feel?</h2>
+          {sent ? (
+            <p className="mt-3 font-medium text-marine-soft">Thanks. Your feedback goes into how the interviewer runs future interviews.</p>
+          ) : (
+            <form className="mt-3 space-y-4" onSubmit={async (e) => {
+              e.preventDefault();
+              await api(`/api/interviews/${id}/feedback`, { method: "POST", body: JSON.stringify({ rating, comment }) });
+              setSent(true);
+            }}>
+              <fieldset>
+                <legend className="text-sm text-white/75">Overall experience</legend>
+                <div className="mt-2 flex gap-2">
+                  {[1, 2, 3, 4, 5].map((n) => (
+                    <button type="button" key={n} onClick={() => setRating(n)} aria-pressed={rating === n}
+                      className={"h-10 w-10 rounded-full text-sm font-semibold " + (rating === n ? "bg-amber text-onaccent" : "bg-call-tile hover:bg-call-line")}>
+                      {n}
+                    </button>
+                  ))}
+                </div>
+              </fieldset>
+              <label className="block text-sm text-white/75">
+                Anything the interviewer could do better?
+                <textarea className="mt-1.5 w-full rounded-lg border border-call-line bg-call-2 p-3 text-white" rows={3}
+                  value={comment} onChange={(e) => setComment(e.target.value)} />
+              </label>
+              <button className="rounded-full bg-amber px-5 py-2 font-semibold text-onaccent disabled:opacity-40" disabled={rating === null}>Send feedback</button>
+            </form>
+          )}
+        </aside>
       </div>
-    </Centered>
+    </div>
   );
 }
 
 function LiveRoom({ id, info }: { id: string; info: any }) {
   const interviewerName = useAuth().user?.preferences?.interviewer_name || "Alex";
+  const [params, setParams] = useSearchParams();
+  const wantsChat = params.get("mode") === "chat";
+  const screening = info.kind === "screening";
+  const [highlight, setHighlight] = useState<{ start_line: number; end_line: number; note: string; at: number } | null>(null);
+  const [noteDot, setNoteDot] = useState(false);
   const [panel, setPanel] = useState<Panel>("code");
   const [side, setSide] = useState<"captions" | "chat" | null>("captions");
   const [notes, setNotes] = useState<string>(info.workspace?.notes ?? "");
@@ -163,6 +272,14 @@ function LiveRoom({ id, info }: { id: string; info: any }) {
     if (name === "draw_on_whiteboard") {
       setPanel("whiteboard");
       setTimeout(() => board.current?.draw(args), 50);
+    }
+    if (name === "highlight_code" && args?.start_line) {
+      setPanel("code");
+      setHighlight({ ...args, at: Date.now() });
+    }
+    if (name === "write_note" && args?.text) {
+      setNotes((n) => (n.trim() ? n.trimEnd() + "\n\n" : "") + args.text);
+      setNoteDot(true);
     }
   }, []);
 
@@ -209,7 +326,8 @@ function LiveRoom({ id, info }: { id: string; info: any }) {
   const mins = startedAt.current ? (Date.now() - startedAt.current) / 60000 : elapsed;
   void tick;
 
-  if (s.state?.ended) return <Finished id={id} prepId={info.prep_id} />;
+  if (s.state?.ended) return <Finished id={id} prepId={info.prep_id} kind={info.kind} />;
+  const chat = s.chatMode;
 
   const you = info.profile?.preferred_name || info.profile?.name || "You";
   const INTERVIEWER = interviewerName;
@@ -233,27 +351,45 @@ function LiveRoom({ id, info }: { id: string; info: any }) {
             {cam.error && <p className="mt-2 text-sm text-white/60">{cam.error}</p>}
           </div>
           <div>
-            <h1 className="font-display text-[34px] leading-tight font-semibold">Ready to join?</h1>
+            <h1 className="font-display text-[34px] leading-tight font-semibold">{screening ? "Ready for a quick chat?" : "Ready to join?"}</h1>
             <p className="mt-2 text-white/75">
-              {INTERVIEWER}, your AI interviewer, is ready for your {info.role} interview. About {info.duration_min}
-              {" "}minutes: your background, your projects, then some coding together.
+              {screening
+                ? <>{INTERVIEWER} will ask about your background, your projects and a few questions from the {info.role} application. About {info.duration_min} minutes. What you say fills in your profile and application, and you check it all afterwards.</>
+                : <>{INTERVIEWER}, your AI interviewer, is ready for your {info.role} interview. About {info.duration_min} minutes: your background, your projects, then some coding together.</>}
             </p>
-            <div className="mt-5 rounded-xl bg-white/[.05] p-4">
+            <div role="radiogroup" aria-label="How you'd like to talk" className="mt-5 grid grid-cols-2 gap-2">
+              {([["voice", "Talk", <Mic size={16} key="m" />], ["chat", "Type instead", <Keyboard size={16} key="k" />]] as const).map(([m, label, icon]) => {
+                const on = (m === "chat") === wantsChat;
+                return (
+                  <button key={m} role="radio" aria-checked={on} onClick={() => setParams(m === "chat" ? { mode: "chat" } : {}, { replace: true })}
+                    className={"flex items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-sm " + (on ? "bg-white text-onaccent font-semibold" : "bg-white/[.06] text-white/75 hover:bg-white/10")}>
+                    {icon} {label}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="mt-3 rounded-xl bg-white/[.05] p-4">
               <div className="text-sm font-semibold">How this works</div>
               <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm text-white/75">
-                <li>Just talk. When you pause, {INTERVIEWER} answers, like a normal call.</li>
-                <li>Interrupt any time, or say "give me a moment" to think; it waits.</li>
-                <li>Prefer typing? Open Chat in the call. Headphones keep the interviewer from hearing itself.</li>
+                {wantsChat ? (<>
+                  <li>Type your answers; {INTERVIEWER} replies in the chat. No microphone needed.</li>
+                  <li>Take as long as you like over each answer.</li>
+                </>) : (<>
+                  <li>Just talk. When you pause, {INTERVIEWER} answers, like a normal call.</li>
+                  <li>Interrupt any time, or say "give me a moment" to think; it waits.</li>
+                  <li>Headphones keep the interviewer from hearing itself.</li>
+                </>)}
+                {screening && <li>You'll see each answer get captured as you go.</li>}
               </ol>
             </div>
-            <MicCheck />
+            {!wantsChat && <MicCheck />}
             <p className="mt-3 text-xs text-white/45">Your camera stays on this screen; it's never recorded or sent.</p>
             <label className="mt-5 flex gap-3 text-sm text-white/85">
               <input type="checkbox" className="mt-1 accent-amber" checked={consent} onChange={(e) => setConsent(e.target.checked)} />
               <span>
-                I understand this interview is conducted and transcribed by AI, that it assesses communication,
-                technical depth, ownership, problem solving, coding and testing, and that a person reviews the
-                results. Audio isn't stored; the transcript and code are.
+                {screening
+                  ? "I understand this call is conducted and transcribed by AI, and that my answers are saved to my profile and used to fill in my application, which I review before anything is sent. Audio isn't stored; the transcript is."
+                  : "I understand this interview is conducted and transcribed by AI, that it assesses communication, technical depth, ownership, problem solving, coding and testing, and that a person reviews the results. Audio isn't stored; the transcript and code are."}
               </span>
             </label>
             <button
@@ -261,9 +397,14 @@ function LiveRoom({ id, info }: { id: string; info: any }) {
               disabled={!consent || !s.connected || starting}
               onClick={async () => {
                 setStarting(true);
+                if (wantsChat) {
+                  s.startChat();
+                  track("interview_joined", { duration: info.duration_min, mode: "chat", kind: info.kind });
+                  return;
+                }
                 try {
                   await s.start();
-                  track("interview_joined", { duration: info.duration_min });
+                  track("interview_joined", { duration: info.duration_min, kind: info.kind });
                 } catch (e) {
                   alert(`Microphone or audio couldn't start: ${e}`);
                   setStarting(false);
@@ -291,13 +432,15 @@ function LiveRoom({ id, info }: { id: string; info: any }) {
       </header>
 
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 px-3 md:grid-cols-[1fr_320px]">
-        {/* Stage: the shared workspace, presented like a shared screen */}
+        {screening ? <CapturePanel items={s.captured.length ? s.captured : (info.plan?.items ?? [])} interviewer={INTERVIEWER} /> : (
+        /* Stage: the shared workspace, presented like a shared screen */
         <section className="flex min-h-[60vh] flex-col overflow-hidden rounded-2xl bg-call-2 md:min-h-0">
           <nav className="flex items-center gap-1 px-3 py-2" role="tablist">
             {(["code", "whiteboard", "notes"] as const).map((p) => (
-              <button key={p} role="tab" aria-selected={panel === p} onClick={() => setPanel(p)}
-                className={"rounded-full px-4 py-1.5 text-sm capitalize " + (panel === p ? "bg-white text-onaccent font-semibold" : "text-white/70 hover:bg-white/10")}>
+              <button key={p} role="tab" aria-selected={panel === p} onClick={() => { setPanel(p); if (p === "notes") setNoteDot(false); }}
+                className={"relative rounded-full px-4 py-1.5 text-sm capitalize " + (panel === p ? "bg-white text-onaccent font-semibold" : "text-white/70 hover:bg-white/10")}>
                 {p}
+                {p === "notes" && noteDot && panel !== "notes" && <span className="absolute top-1 right-1.5 h-2 w-2 rounded-full bg-amber" aria-label="new note" />}
               </button>
             ))}
             <span className="ml-auto text-xs text-white/50">{INTERVIEWER} can see this workspace</span>
@@ -314,6 +457,7 @@ function LiveRoom({ id, info }: { id: string; info: any }) {
                   s.syncWorkspace({ code, language: "python" });
                 }}
                 onRun={(code, mode) => s.runCode(code, mode)}
+                highlight={highlight}
               />
             </div>
             <div className={panel === "whiteboard" ? "h-full" : "hidden"}>
@@ -334,7 +478,7 @@ function LiveRoom({ id, info }: { id: string; info: any }) {
                 className="h-[calc(100%-2rem)] w-full resize-none rounded-md border border-line bg-surface p-4 font-mono text-sm leading-relaxed" />
             </div>
           </div>
-        </section>
+        </section>)}
 
         {/* People + captions/chat, like a call's side strip */}
         <aside className="flex min-h-0 flex-col gap-3">
@@ -343,9 +487,9 @@ function LiveRoom({ id, info }: { id: string; info: any }) {
           <Tile name={`${you} (you)`} initial={you} tone="marine" stream={cam.stream} speaking={youTalking}
             levels={s.levels} who="candidate" muted={!s.micOn}
             status={s.activity === "holding" ? "Take your time" : undefined} />
-          {side && (
+          {(side || chat) && (
             <div className="flex min-h-[220px] flex-1 flex-col overflow-hidden rounded-2xl bg-call-2">
-              <div className="flex items-center gap-1 px-3 pt-2">
+              <div className={"flex items-center gap-1 px-3 pt-2" + (chat ? " hidden" : "")}>
                 {(["captions", "chat"] as const).map((t) => (
                   <button key={t} onClick={() => setSide(t)} aria-pressed={side === t}
                     className={"rounded-full px-3 py-1 text-sm capitalize " + (side === t ? "bg-white/15 font-semibold" : "text-white/60 hover:text-white")}>
@@ -353,7 +497,9 @@ function LiveRoom({ id, info }: { id: string; info: any }) {
                   </button>
                 ))}
               </div>
-              {side === "captions" ? <Transcript lines={s.lines} you={you} interviewer={INTERVIEWER} /> : (
+              {chat ? (
+                <ChatBox lines={s.lines} you={you} interviewer={INTERVIEWER} thinking={s.activity === "thinking"} onSend={s.sendText} />
+              ) : side === "captions" ? <Transcript lines={s.lines} you={you} interviewer={INTERVIEWER} /> : (
                 <div className="min-h-0 flex-1 bg-paper text-ink">
                   <CopilotChat className="ib-chat" agentId="interviewer" threadId={id}
                     labels={{ chatInputPlaceholder: "Type to your interviewer…" }} />
@@ -375,22 +521,26 @@ function LiveRoom({ id, info }: { id: string; info: any }) {
           <span>{info.role}</span>
         </div>
         <div className="flex items-center gap-3">
-          <RoundButton label={s.micOn ? "Mute microphone" : "Unmute microphone"} off={!s.micOn} onClick={s.toggleMic}>
-            {s.micOn ? <Mic size={20} /> : <MicOff size={20} />}
-          </RoundButton>
+          {!chat && (
+            <RoundButton label={s.micOn ? "Mute microphone" : "Unmute microphone"} off={!s.micOn} onClick={s.toggleMic}>
+              {s.micOn ? <Mic size={20} /> : <MicOff size={20} />}
+            </RoundButton>
+          )}
           <RoundButton label={cam.on ? "Turn off camera" : "Turn on camera"} off={!cam.on} onClick={cam.toggle}>
             {cam.on ? <Video size={20} /> : <VideoOff size={20} />}
           </RoundButton>
-          <RoundButton label="Transcript" active={side === "captions"} onClick={() => setSide(side === "captions" ? null : "captions")}>
-            <Captions size={20} />
-          </RoundButton>
-          <RoundButton label="Chat with the interviewer" active={side === "chat"} onClick={() => setSide(side === "chat" ? null : "chat")}>
-            <MessageSquareText size={20} />
-          </RoundButton>
+          {!chat && (<>
+            <RoundButton label="Transcript" active={side === "captions"} onClick={() => setSide(side === "captions" ? null : "captions")}>
+              <Captions size={20} />
+            </RoundButton>
+            <RoundButton label="Chat with the interviewer" active={side === "chat"} onClick={() => setSide(side === "chat" ? null : "chat")}>
+              <MessageSquareText size={20} />
+            </RoundButton>
+          </>)}
           <button aria-label="End the interview" title="End the interview"
             className="flex h-11 w-16 items-center justify-center rounded-full bg-hangup hover:brightness-110"
             onClick={() => {
-              if (confirm("End the interview now?")) s.end();
+              if (confirm(screening ? "End the call now?" : "End the interview now?")) s.end();
             }}>
             <PhoneOff size={20} />
           </button>
@@ -587,4 +737,69 @@ function Transcript({ lines, you, interviewer }: { lines: ReturnType<typeof useI
 function fmtClock(min: number) {
   const s = Math.max(0, Math.floor(min * 60));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+/** Screening call stage: the checklist of what the call needs to cover, filling in from the candidate's own words. */
+function CapturePanel({ items, interviewer }: { items: CaptureItem[]; interviewer: string }) {
+  const done = items.filter((i) => i.captured).length;
+  return (
+    <section className="flex min-h-[60vh] flex-col overflow-hidden rounded-2xl bg-call-2 md:min-h-0">
+      <div className="flex items-baseline justify-between gap-3 px-5 pt-4">
+        <h2 className="font-display text-lg font-semibold">What {interviewer} is filling in</h2>
+        <span className="text-sm text-white/60 tabular-nums">{done} of {items.length}</span>
+      </div>
+      <div className="mx-5 mt-2 h-1.5 overflow-hidden rounded-full bg-white/10">
+        <div className="h-full rounded-full bg-marine transition-[width] duration-500" style={{ width: `${items.length ? (done / items.length) * 100 : 0}%` }} />
+      </div>
+      <ul className="min-h-0 flex-1 space-y-2.5 overflow-y-auto px-5 py-4">
+        {items.map((it) => (
+          <li key={it.id} className={"rounded-xl p-3.5 transition-colors " + (it.captured ? "bg-marine/15" : "bg-white/[.04]")}>
+            <div className="flex items-start gap-3">
+              <span className={"mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full " + (it.captured ? "bg-marine" : "bg-white/10")}>
+                {it.captured ? <Check size={13} /> : <CircleDashed size={13} className="text-white/40" />}
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="text-[13px] text-white/50">{it.kind === "application" ? "From the application form" : "About the role"}{it.required ? " · important" : ""}</div>
+                <div className="text-[15px] text-white/90">{it.ask}</div>
+                {it.captured && (
+                  <div className="mt-1.5 text-[15px]">
+                    <span className="font-semibold text-white">{it.captured.answer}</span>
+                    <div className="mt-0.5 flex gap-1.5 text-sm text-white/50 italic"><Quote size={12} className="mt-1 shrink-0" />{it.captured.quote}</div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </li>
+        ))}
+        {!items.length && <li className="text-white/60">Nothing specific to cover: just a chat about your background.</li>}
+      </ul>
+      <p className="px-5 pb-4 text-xs text-white/45">Only your own words count. You can correct anything after the call.</p>
+    </section>
+  );
+}
+
+/** Typed conversation over the same connection as voice. */
+function ChatBox({ lines, you, interviewer, thinking, onSend }: {
+  lines: ReturnType<typeof useInterview>["lines"]; you: string; interviewer: string; thinking: boolean; onSend: (t: string) => void;
+}) {
+  const [text, setText] = useState("");
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <Transcript lines={lines} you={you} interviewer={interviewer} />
+      {thinking && <div className="px-4 pb-1 text-xs text-white/50">{interviewer} is typing…</div>}
+      <form className="flex items-end gap-2 border-t border-white/10 p-3" onSubmit={(e) => {
+        e.preventDefault();
+        if (!text.trim()) return;
+        onSend(text.trim());
+        setText("");
+      }}>
+        <textarea value={text} onChange={(e) => setText(e.target.value)} rows={2} aria-label="Your answer" placeholder="Type your answer…"
+          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); (e.currentTarget.form as HTMLFormElement).requestSubmit(); } }}
+          className="min-w-0 flex-1 resize-none rounded-xl border border-call-line bg-call p-2.5 text-[15px] text-white placeholder:text-white/40" />
+        <button aria-label="Send" className="flex h-10 w-10 items-center justify-center rounded-full bg-amber text-onaccent disabled:opacity-40" disabled={!text.trim()}>
+          <Send size={17} />
+        </button>
+      </form>
+    </div>
+  );
 }

@@ -47,8 +47,15 @@ export type SessionState = {
   phase_budgets: { phase: string; minutes: number; goals: string[] }[];
   phase_history: { phase: string; minutes: number }[];
   voice_enabled: boolean;
+  kind?: "interview" | "screening";
   ended: boolean;
   sample_rate: number;
+};
+
+/** Screening call checklist: what still needs covering and what's been captured from the candidate's own words. */
+export type CaptureItem = {
+  id: string; kind: "requirement" | "application"; ask: string; options: string[]; required: boolean;
+  captured: { answer: string; quote: string } | null;
 };
 
 type UIHandler = (name: string, args: any) => void;
@@ -69,6 +76,8 @@ export function useInterview(interviewId: string, onUIAction: UIHandler) {
   const [error, setError] = useState<string | null>(null);
   const [micOn, setMicOn] = useState(true);
   const [lastLatency, setLastLatency] = useState<number | null>(null);
+  const [captured, setCaptured] = useState<CaptureItem[]>([]);
+  const [chatMode, setChatMode] = useState(false);
 
   const ws = useRef<WebSocket | null>(null);
   const player = useRef<PCMPlayer | null>(null);
@@ -211,6 +220,9 @@ export function useInterview(interviewId: string, onUIAction: UIHandler) {
           case "memory":
             setMemory(m.memory);
             break;
+          case "captured":
+            setCaptured(m.items);
+            break;
           case "ui_action":
             uiRef.current(m.name, m.args);
             break;
@@ -330,6 +342,15 @@ export function useInterview(interviewId: string, onUIAction: UIHandler) {
     [],
   );
 
+  /** Typed chat instead of voice: no microphone, no audio; the interviewer replies in text. */
+  const startChat = useCallback(() => {
+    setChatMode(true);
+    setStarted(true);
+    setMicOn(false);
+    setActivity("listening");
+    send({ type: "start", voice: false });
+  }, [send]);
+
   const toggleMic = useCallback(async () => {
     if (!vad.current) return;
     if (micOn) await vad.current.pause();
@@ -351,6 +372,6 @@ export function useInterview(interviewId: string, onUIAction: UIHandler) {
 
   return {
     connected, started, state, lines, activity, problem, codeResult, codeRunning, memory, error, micOn,
-    lastLatency, levels, start, toggleMic, sendText, runCode, syncWorkspace, end,
+    lastLatency, levels, captured, chatMode, start, startChat, toggleMic, sendText, runCode, syncWorkspace, end,
   };
 }

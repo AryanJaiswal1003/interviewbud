@@ -31,7 +31,7 @@ async def session_ws(ws: WebSocket, interview_id: UUID):
     async with SessionLocal() as db:
         iv = await db.get(Interview, interview_id)
     if user is None or iv is None or iv.owner_id != user.id:
-        msg = "Sign in to join this interview" if user is None else "interview not found"
+        msg = "Choose your account to join this interview" if user is None else "interview not found"
         await ws.send_text(json.dumps({"type": "error", "message": msg, "fatal": True}))
         await ws.close(code=4401 if user is None else 4404)
         return
@@ -59,7 +59,7 @@ async def session_ws(ws: WebSocket, interview_id: UUID):
             data = json.loads(msg.get("text") or "{}")
             kind = data.get("type")
             if kind == "start":
-                await rt.start()
+                await rt.start(voice=data.get("voice", True) is not False)
             elif kind == "speech_start":
                 await rt.on_speech_start()
             elif kind == "speech_misfire":

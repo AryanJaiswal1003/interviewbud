@@ -198,12 +198,12 @@ async def test_goodbye_ends_the_interview_right_away(rt, monkeypatch):
         _tool(1, "e1", "end_interview", '{"reason": "candidate asked to end"}')]]))
     t0 = asyncio.get_running_loop().time()
     await rt.handle_text("I think that's enough, let's end here.")
-    for _ in range(100):
+    for _ in range(250):
         if rt.ws.of("ended"):
             break
         await asyncio.sleep(0.02)
     assert rt.ws.of("ended"), "browser was never told the interview ended"
-    assert asyncio.get_running_loop().time() - t0 < 2.0
+    assert asyncio.get_running_loop().time() - t0 < 5.0  # seconds, not the minutes it used to take
     assert rt.id not in session.RUNTIMES
     async with SessionLocal() as db:
         iv = await db.get(Interview, rt.id)

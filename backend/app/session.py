@@ -17,12 +17,13 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
+import httpx
 from fastapi import WebSocket
 from sqlalchemy import select
 
 from . import llm
 from .agent import memory as wm
-from .agent.prompts import FIRE_AND_FORGET, TOOLS, system_prompt
+from .agent.prompts import FIRE_AND_FORGET, SCREENING_TOOLS, TOOLS, screening_prompt, system_prompt
 from .coding import service as coding
 from .config import get_settings
 from .db import Interview, Problem, SessionLocal, Turn, User, WorkspaceSnapshot
@@ -105,7 +106,14 @@ class SessionRuntime:
         self.last_run: dict | None = None
         self.started_at = interview.started_at.timestamp() if interview.started_at else None
         self.ended = interview.status in ("completed", "scored")
-        self.system = system_prompt(self.role, self.plan, self.profile, interviewer_name)
+        self.kind = interview.kind or "interview"
+        if self.kind == "screening":
+            self.system = screening_prompt(self.role, self.plan.get("company", ""), self.plan, self.profile,
+                                           interviewer_name)
+            self.tools = SCREENING_TOOLS
+        else:
+            self.system = system_prompt(self.role, self.plan, self.profile, interviewer_name)
+            self.tools = TOOLS
         self.vocab = speech_vocabulary(self.profile, self.plan, interview.focus)
         self.ws: WebSocket | None = None
         self.ws_lock = asyncio.Lock()
@@ -141,6 +149,8 @@ class SessionRuntime:
         await self.send_state()
         if self.problem and self.memory.get("problem_presented"):
             await self.send({"type": "problem", "problem": await self.problem_view()})
+        if self.kind == "screening":
+            await self.send(self.captured_view())
         await self.send({"type": "history", "turns": [
             {"seq": h["seq"], "speaker": "interviewer" if h["role"] == "assistant" else "candidate",
              "text": strip_tags(h["content"])}
@@ -198,6 +208,7 @@ class SessionRuntime:
             "phase_budgets": self.plan.get("phase_budgets", []),
             "phase_history": self.memory.get("phase_history", []),
             "voice_enabled": self.voice_enabled,
+            "kind": self.kind,
             "ended": self.ended,
             "sample_rate": get_settings().tts_output_rate,
         })
@@ -218,7 +229,9 @@ class SessionRuntime:
         }
 
     # ---------------- opening ----------------
-    async def start(self) -> None:
+    async def start(self, voice: bool = True) -> None:
+        # Typed chat: the candidate chose not to use voice, so the interviewer doesn't speak either.
+        self.voice_enabled = get_settings().tts_configured and voice
         if self.ended:
             await self.send_state()
             return
@@ -428,7 +441,46 @@ class SessionRuntime:
         r.task = asyncio.create_task(self._generate(r, sink))
 
     # ---------------- generation ----------------
+    def captured_view(self) -> dict:
+        captured = self.memory.get("captured", {})
+        return {"type": "captured", "items": [{**it, "captured": captured.get(it["id"])}
+                                              for it in self.plan.get("items", [])]}
+
+    def _screening_state(self) -> str:
+        captured = self.memory.get("captured", {})
+        items = self.plan.get("items", [])
+        todo = [it for it in items if it["id"] not in captured]
+        remaining = self.duration_min - self.elapsed_min()
+        lines = ["LIVE STATE (private to you)",
+                 f"Time: {self.elapsed_min():.1f} of about {self.duration_min} min. Phase '{self.memory['phase']}'.",
+                 "STILL TO COVER (ask about these naturally, must-haves first; they're the job's requirements and "
+                 "the application form's questions):"]
+        for it in todo:
+            opts = f" (options: {' / '.join(it['options'])})" if it.get("options") else ""
+            lines.append(f"  - {'[must] ' if it.get('required') else ''}{it['ask']}{opts}")
+        if not todo:
+            lines.append("  (everything is covered: ask if there's anything they'd like to add, then wrap up)")
+        if captured:
+            lines.append("ALREADY CAPTURED (don't ask again): " + "; ".join(
+                f"{next((i['ask'] for i in items if i['id'] == k), k)[:60]} -> {v['answer'][:80]}"
+                for k, v in captured.items()))
+        asked = [strip_tags(h["content"]) for h in self.history if h["role"] == "assistant" and "?" in h["content"]]
+        if asked:
+            lines.append("YOU ALREADY ASKED (never ask these again, even reworded; if they weren't answered, let them "
+                         "go and leave the item for later):")
+            lines += [f"  - {q[-160:]}" for q in asked[-8:]]
+        last = next((h["content"] for h in reversed(self.history) if h["role"] == "user"), "")
+        if turns.sounds_done(last):
+            lines.append("They just said they're done or have no more questions: thank them and wrap up NOW (say what "
+                         "happens next, then call end_interview), even if items remain; they can add them later.")
+        if remaining < 3:
+            lines.append("Time is nearly up: cover anything essential in one question, then wrap up.")
+        lines.append("Respond with what you say next (or exactly <listen/>).")
+        return "\n".join(lines)
+
     def _live_state(self) -> str:
+        if self.kind == "screening":
+            return self._screening_state()
         mem = self.memory
         phase = mem["phase"]
         in_phase = (time.time() - mem.get("phase_started", time.time())) / 60
@@ -511,6 +563,7 @@ class SessionRuntime:
             await self._refresh_lessons()
         chunker = SentenceChunker()
         tts: TTSStream | LocalTTSStream | None = None
+        started = False
         listen = False
         try:
             await self.send({"type": "thinking", "turn_id": r.turn_id})
@@ -518,7 +571,8 @@ class SessionRuntime:
             t_llm = time.perf_counter()
             for _round in range(3):
                 stream = await llm.client().chat.completions.create(
-                    model=self.chat_dep, messages=msgs, tools=TOOLS, stream=True,
+                    model=self.chat_dep, messages=msgs, tools=self.tools, stream=True,
+                    timeout=httpx.Timeout(40, connect=5),  # live turn: a stalled stream is retried quickly
                     **llm.sampling_kwargs(self.chat_dep, 0.7, 450, self.chat_effort),
                 )
                 head, decided = "", False
@@ -546,7 +600,8 @@ class SessionRuntime:
                                 continue
                             delta = d.content
                         round_text.append(delta)
-                        if tts is None:
+                        if not started:
+                            started = True
                             tts = await self._take_tts(r)
                             r.tts = tts
                             await self.send({"type": "agent_turn_start", "turn_id": r.turn_id})
@@ -695,6 +750,9 @@ class SessionRuntime:
             await db.commit()
 
     async def _extract(self, interviewer_text: str, candidate_text: str, seq: int) -> None:
+        if self.kind == "screening":
+            await self._capture(interviewer_text, candidate_text)
+            return
         async with self.extract_lock:
             # Background work: let the live reply have the rate limit (50k TPM on this deployment) first.
             for _ in range(60):
@@ -707,6 +765,24 @@ class SessionRuntime:
                 await self.send({"type": "memory", "memory": self.memory_view()})
             except Exception as e:
                 log.warning("memory extraction failed: %s", e)
+
+    async def _capture(self, question: str, answer: str) -> None:
+        """Screening: fill application answers and profile items from what they just said (shown live)."""
+        from .prep import screening
+        async with self.extract_lock:
+            try:
+                # Bounded: a stalled request mustn't hold up the next answers' captures (the pass after the call
+                # covers anything missed here).
+                got = await asyncio.wait_for(screening.capture_turn(
+                    self.plan.get("items", []), self.memory.setdefault("captured", {}), question, answer,
+                    self.chat_dep), 30)
+            except (Exception, asyncio.TimeoutError) as e:
+                log.warning("screening capture failed: %s", e)
+                return
+            for c in got:
+                self.memory["captured"][c["item_id"]] = {"answer": c["answer"], "quote": c["quote"]}
+            if got:
+                await self.send(self.captured_view())
 
     def memory_view(self) -> dict:
         m = self.memory
@@ -766,6 +842,24 @@ class SessionRuntime:
                 return {"ok": True, "input": t.call_args, "expected": t.expected_repr}
             if name == "show_panel":
                 await self.send({"type": "ui_action", "name": "show_panel", "args": args})
+                return {"ok": True}
+            if name == "highlight_code":
+                lines = len(self.workspace.get("code", "").splitlines()) or 1
+                start = max(1, min(int(args.get("start_line", 1)), lines))
+                end = max(start, min(int(args.get("end_line", start)), lines))
+                await self.send({"type": "ui_action", "name": "highlight_code",
+                                 "args": {"start_line": start, "end_line": end, "note": str(args.get("note", ""))[:120]}})
+                return {"ok": True, "lines": [start, end]}
+            if name == "write_note":
+                text = str(args.get("text", "")).strip()[:600]
+                if not text:
+                    return {"ok": False, "error": "empty note"}
+                note = f"{self.interviewer_name}: {text}"
+                notes = self.workspace.get("notes", "").rstrip()
+                self.workspace["notes"] = (notes + "\n\n" if notes else "") + note
+                await self.send({"type": "ui_action", "name": "write_note", "args": {"text": note}})
+                self.spawn(self._save_workspace())
+                r.actions.append("added a note")
                 return {"ok": True}
             if name == "draw_on_whiteboard":
                 await self.send({"type": "ui_action", "name": "draw_on_whiteboard", "args": args})
@@ -894,7 +988,11 @@ class SessionRuntime:
                 iv = await db.get(Interview, self.id)
                 iv.memory = self.memory
                 await db.commit()
-        await scorecard.finalize(self.id)
+        if self.kind == "screening":
+            from .prep import screening
+            await screening.finalize(self.id)
+        else:
+            await scorecard.finalize(self.id)
 
     async def end_now(self) -> None:
         if self.reply and self.reply.task and not self.reply.task.done():

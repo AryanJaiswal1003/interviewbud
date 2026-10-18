@@ -39,7 +39,9 @@ export function CodePanel({
   initialCode,
   onChange,
   onRun,
+  highlight,
 }: {
+  highlight?: { start_line: number; end_line: number; note: string; at: number } | null;
   problem: Problem | null;
   result: CodeResult | null;
   running: null | "run" | "submit";
@@ -52,6 +54,21 @@ export function CodePanel({
   const debounce = useRef<number | undefined>(undefined);
   const loadedFor = useRef<number | null>(null);
   const editor = useRef<any>(null);
+  const decorations = useRef<any>(null);
+  // The interviewer points at lines ("line twelve, the loop bound"): highlight them for a while and scroll there.
+  useEffect(() => {
+    const ed = editor.current;
+    if (!highlight || !ed) return;
+    decorations.current?.clear();
+    decorations.current = ed.createDecorationsCollection([{
+      range: { startLineNumber: highlight.start_line, startColumn: 1, endLineNumber: highlight.end_line, endColumn: 1 },
+      options: { isWholeLine: true, className: "ib-pointed-line", linesDecorationsClassName: "ib-pointed-gutter",
+        hoverMessage: { value: highlight.note } },
+    }]);
+    ed.revealLinesInCenterIfOutsideViewport(highlight.start_line, highlight.end_line);
+    const t = window.setTimeout(() => decorations.current?.clear(), 20000);
+    return () => window.clearTimeout(t);
+  }, [highlight]);
   // Read straight from Monaco on run: state can lag a keystroke behind the click.
   const current = () => editor.current?.getValue() ?? code;
 
@@ -154,7 +171,12 @@ export function CodePanel({
             </button>
           </div>
         </div>
-        <div className="min-h-0 flex-1">
+        <div className="relative min-h-0 flex-1">
+          {highlight && highlight.note && (
+            <div className="pointer-events-none absolute top-2 right-4 z-10 max-w-xs rounded-lg bg-amber px-3 py-1.5 text-sm font-medium text-onaccent shadow">
+              Line {highlight.start_line}{highlight.end_line > highlight.start_line ? `–${highlight.end_line}` : ""}: {highlight.note}
+            </div>
+          )}
           <Editor
             theme={theme === "dark" ? "vs-dark" : "light"}
             language="python"

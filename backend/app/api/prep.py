@@ -12,7 +12,7 @@ from .. import auth
 from ..agent import resume
 from ..db import (Interview, Opportunity, PrepPlan, PrepQuestion, PrepSession, ProfileFact, ProfileFactRevision,
                   SessionLocal, Turn, User, get_db)
-from ..prep import fetcher, service
+from ..prep import fetcher, screening, service
 
 router = APIRouter(prefix="/api", tags=["prep"])
 _reviewing: set[str] = set()
@@ -96,11 +96,17 @@ async def get_prep(prep_id: UUID, user: User = Depends(auth.current_user), db: A
         },
         "coverage": prep.coverage,
         "questions": [{"id": q.id, "requirement_id": q.requirement_id, "question": q.question, "why": q.why,
-                       "answer": q.answer, "status": q.status, "fact_id": q.fact_id} for q in questions],
+                       "quick_replies": q.quick_replies or [], "answer": q.answer, "status": q.status,
+                       "fact_id": q.fact_id} for q in questions if q.status != "queued"],
+        "queued_questions": sum(q.status == "queued" for q in questions),
         "facts": [service.fact_view(f) for f in facts],
         "plans": [{"version": p.version, "note": p.note, "created_at": p.created_at.isoformat()} for p in plans],
         "plan": {"version": plans[0].version, **plans[0].plan} if plans else None,
-        "practices": [{"id": str(iv.id), "status": iv.status, "plan_version": iv.plan_version,
+        "practices": [{"id": str(iv.id), "kind": iv.kind or "interview", "status": iv.status,
+                       "plan_version": iv.plan_version,
+                       "captured": len((iv.scorecard or {}).get("captured", {})) if iv.kind == "screening" else None,
+                       "items_total": len(iv.plan.get("items", [])) if iv.kind == "screening" else None,
+                       "next_interview_id": (iv.scorecard or {}).get("next_interview_id"),
                        "created_at": iv.created_at.isoformat(), "duration_min": iv.duration_min,
                        "recommendation": (iv.scorecard or {}).get("recommendation"),
                        "scores": {d["dimension"]: d["score"] for d in (iv.scorecard or {}).get("dimensions", [])},
@@ -168,6 +174,7 @@ async def skip(prep_id: UUID, qid: int, user: User = Depends(auth.current_user),
     if not q or q.prep_id != prep.id or q.status != "open":
         raise HTTPException(404)
     q.status = "skipped"
+    await service.promote_next(db, prep.id)
     await db.commit()
     service.spawn(_refresh(prep.id))
     return {"ok": True}
@@ -239,6 +246,17 @@ async def practice(prep_id: UUID, body: PracticeIn, user: User = Depends(auth.cu
     if not plan:
         raise HTTPException(409, "Build a preparation plan first")
     iv = await service.start_practice(db, prep, user, plan, max(10, min(60, body.duration_min)))
+    return {"interview_id": str(iv.id)}
+
+
+@router.post("/prep/{prep_id}/screening")
+async def screening_call(prep_id: UUID, user: User = Depends(auth.current_user), db: AsyncSession = Depends(get_db)):
+    """Start the screening call (voice or typed: the room decides). Ready instantly; no planning step."""
+    prep = await owned_prep(db, prep_id, user)
+    if prep.status in ("intake", "needs_text", "failed"):
+        raise HTTPException(409, "The job posting needs to be read first")
+    auth.throttled(auth.create_throttle, f"user:{user.id}", "interviews created")
+    iv = await screening.start(db, prep, user)
     return {"interview_id": str(iv.id)}
 
 

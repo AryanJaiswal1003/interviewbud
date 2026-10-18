@@ -56,3 +56,12 @@ TIME_ACKS = ("Sure, take your time.", "Of course, go for it.", "Sure thing, take
 def is_backchannel(text: str) -> bool:
     """Short acknowledgements while the interviewer talks shouldn't be treated as interruptions."""
     return bool(re.fullmatch(r"\s*(mm-?hmm|mhm|uh-?huh|yeah|yep|right|okay|ok|sure|got it|i see)[\s.!]*", text, re.I))
+
+
+_DONE = re.compile(r"\b(no (more )?questions|nothing (else|more)|that'?s (everything|all|it)|i'?m (all )?(good|done)|"
+                   r"all set|we can (wrap|end|stop)|let'?s (wrap|end|stop))\b", re.I)
+
+
+def sounds_done(text: str) -> bool:
+    """The candidate signalling they've nothing more to add (screening calls wrap up on this)."""
+    return bool(_DONE.search(text or ""))

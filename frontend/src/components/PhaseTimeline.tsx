@@ -29,7 +29,7 @@ export function PhaseTimeline({ state }: { state: SessionState | null }) {
                 "mt-1.5 truncate text-xs " + (status === "now" ? "font-bold text-white" : "text-white/55")
               }
             >
-              {p.label}
+              {state?.kind === "screening" && p.key === "technical" ? "Role questions" : p.label}
             </div>
           </li>
         );
