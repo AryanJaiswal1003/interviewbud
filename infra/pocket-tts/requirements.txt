@@ -1,0 +1,5 @@
+pocket-tts==3.3.0
+fastapi==0.143.3
+uvicorn[standard]==0.54.0
+ormsgpack==1.13.0
+python-multipart==0.0.32

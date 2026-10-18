@@ -1,0 +1,52 @@
+# Self-hosted Fish Audio TTS (github.com/fishaudio/fish-speech, S2-Pro) for InterviewBud.
+# Runs on a Linux host with an NVIDIA GPU (>= 24 GB VRAM) and the NVIDIA container toolkit; fish-speech does not
+# support Apple Silicon (MPS), and CPU inference is far too slow for a live conversation.
+#
+#   hf download fishaudio/s2-pro --local-dir checkpoints/s2-pro
+#   FISH_SERVER_API_KEY=<random secret> docker compose up -d
+#   curl -H "Authorization: Bearer $FISH_SERVER_API_KEY" http://<host>:8080/v1/health
+#
+# Then on the InterviewBud machine: TTS_PROVIDER=fish_local, FISH_LOCAL_URL=http://<host>:8080,
+# FISH_LOCAL_API_KEY=<same secret>.
+#
+# Licence: the S2-Pro weights are under the Fish Audio Research License (research and non-commercial use);
+# commercial use needs a licence from Fish Audio (business@fish.audio).
+name: interviewbud-fish
+
+services:
+  fish-speech:
+    image: fishaudio/fish-speech:server-cuda
+    restart: unless-stopped
+    ports:
+      - "${FISH_PORT:-8080}:8080"
+    volumes:
+      - ./checkpoints:/app/checkpoints
+      - ./references:/app/references  # reference voices added from InterviewBud's Settings page live here
+    environment:
+      COMPILE: ${COMPILE:-1}  # torch.compile: slower first start, much faster generation
+      FISH_SERVER_API_KEY: ${FISH_SERVER_API_KEY:-}
+    # The image's start script doesn't forward --api-key, so start the server directly.
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - >-
+        exec uv run tools/api_server.py
+        --listen 0.0.0.0:8080
+        --llama-checkpoint-path checkpoints/s2-pro
+        --decoder-checkpoint-path checkpoints/s2-pro/codec.pth
+        --decoder-config-name modded_dac_vq
+        $$( [ "$$COMPILE" = 1 ] && echo --compile )
+        $${FISH_SERVER_API_KEY:+--api-key "$$FISH_SERVER_API_KEY"}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      # /v1/health sits behind the API key when one is set, so probe it with the key.
+      test: ["CMD-SHELL", "curl -fs -H \"Authorization: Bearer $$FISH_SERVER_API_KEY\" http://localhost:8080/v1/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 600s
+      retries: 3

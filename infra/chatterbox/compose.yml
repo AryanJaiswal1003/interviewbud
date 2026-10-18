@@ -1,0 +1,30 @@
+# Chatterbox TTS for InterviewBud on a Linux host with an NVIDIA GPU (T4, A10 or better) + NVIDIA container toolkit.
+#
+#   API_KEY=<random secret> docker compose up -d --build
+#   curl -H "Authorization: Bearer $API_KEY" http://<host>:8790/v1/health
+#
+# InterviewBud .env: TTS_PROVIDER=chatterbox, TTS_SERVER_URL=http://<host>:8790, TTS_SERVER_API_KEY=<same secret>
+name: interviewbud-chatterbox
+
+services:
+  chatterbox:
+    build: .
+    image: interviewbud-chatterbox:5de7a54
+    restart: unless-stopped
+    ports:
+      - "8790:8790"
+    environment:
+      API_KEY: ${API_KEY:?set API_KEY}
+      CHATTERBOX_MODEL: ${CHATTERBOX_MODEL:-turbo}
+    volumes:
+      - chatterbox-data:/data  # model weights (HF cache) and reference voices
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  chatterbox-data:
