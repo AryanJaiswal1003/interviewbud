@@ -5,6 +5,7 @@ import logging
 from functools import lru_cache
 from typing import Any, TypeVar
 
+import httpx
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
@@ -23,7 +24,10 @@ def client() -> AsyncOpenAI:
     s = get_settings()
     if not (s.azure_openai_endpoint and s.azure_openai_api_key):
         raise LLMNotConfigured("Set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY in .env")
-    return AsyncOpenAI(base_url=s.azure_base_url, api_key=s.azure_openai_api_key, max_retries=2)
+    # A stalled request must not hang a journey step for the SDK's default ten minutes: give up on a silent
+    # connection after two and a half minutes and retry (structured steps normally take well under a minute).
+    return AsyncOpenAI(base_url=s.azure_base_url, api_key=s.azure_openai_api_key, max_retries=2,
+                       timeout=httpx.Timeout(150, connect=10))
 
 
 def _is_reasoning(deployment: str) -> bool:
@@ -74,16 +78,24 @@ async def structured(
     reasoning_effort: str = "",
 ) -> T:
     dep = deployment or get_settings().reasoning_deployment
-    resp = await client().chat.completions.parse(
-        model=dep,
-        messages=[{"role": "system", "content": system + "\n" + UNTRUSTED_NOTE}, {"role": "user", "content": user}],
-        response_format=schema,
-        **sampling_kwargs(dep, temperature, max_tokens, reasoning_effort),
-    )
-    msg = resp.choices[0].message
-    if msg.parsed is None:
-        raise RuntimeError(f"Model refused or returned unparsable output: {msg.refusal or msg.content!r}")
-    return msg.parsed
+    last = ""
+    for attempt in range(2):  # the endpoint occasionally answers with no choices or cut-off JSON: one retry
+        resp = await client().chat.completions.parse(
+            model=dep,
+            messages=[{"role": "system", "content": system + "\n" + UNTRUSTED_NOTE}, {"role": "user", "content": user}],
+            response_format=schema,
+            **sampling_kwargs(dep, temperature, max_tokens, reasoning_effort),
+        )
+        if not resp.choices:
+            last = "no choices in the response"
+            continue
+        msg = resp.choices[0].message
+        if msg.parsed is not None:
+            return msg.parsed
+        if msg.refusal:
+            raise RuntimeError(f"Model refused: {msg.refusal!r}")
+        last = f"unparsable output: {msg.content!r}"[:300]
+    raise RuntimeError(f"Model returned {last}")
 
 
 async def text(
