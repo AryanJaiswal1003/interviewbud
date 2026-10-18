@@ -19,7 +19,7 @@ export function ConsentBanner() {
         <div>
           <p className="font-semibold">Cookies</p>
           <p className="mt-1 text-[15px] text-graphite">
-            We use essential cookies to keep you signed in. With your OK we also use an analytics cookie to see
+            We use an essential cookie to remember your account. With your OK we also use an analytics cookie to see
             how InterviewBud is used, so we can improve it. It stays with us; nothing goes to third parties.
           </p>
           <div className="mt-4 flex flex-wrap gap-2">

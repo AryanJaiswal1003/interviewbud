@@ -117,3 +117,18 @@ body {
   --copilot-kit-background-color: var(--color-paper);
   height: 100%;
 }
+
+/* A line the interviewer is pointing at in the editor. */
+.ib-pointed-line { background: rgba(236, 164, 0, 0.18); }
+.ib-pointed-gutter { background: #eca400; width: 4px !important; margin-left: 3px; }
+
+/* Landing hero: one orchestrated sequence (call lines, then the form filling itself). */
+@keyframes ib-rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes ib-fill { 0% { border-color: var(--color-line); } 35% { border-color: var(--color-marine); background: var(--color-marine-soft); } 100% { border-color: var(--color-line); } }
+@keyframes ib-live { 50% { opacity: 0.35; } }
+.ib-rise { animation: ib-rise 0.5s ease-out both; }
+.ib-fill { animation: ib-fill 1.4s ease-out both; }
+.ib-live { animation: ib-live 1.6s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .ib-rise, .ib-fill, .ib-live { animation: none; }
+}
