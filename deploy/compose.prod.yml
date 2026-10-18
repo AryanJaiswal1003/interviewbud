@@ -1,0 +1,59 @@
+# Production stack for one Linux VM. Secrets come from deploy/.env.prod (never committed).
+#   deploy/deploy.sh does the build and rollout; see docs/deploy.md.
+name: interviewbud
+
+services:
+  web:
+    build: { context: .., dockerfile: deploy/web.Dockerfile }
+    restart: unless-stopped
+    ports: ["80:80", "443:443", "443:443/udp"]
+    environment:
+      DOMAINS: ${DOMAINS}
+    volumes: [caddy_data:/data, caddy_config:/config]
+    depends_on: [api, copilot]
+
+  api:
+    build: { context: ../backend }
+    restart: unless-stopped
+    env_file: .env.prod
+    volumes:
+      - api_data:/app/data
+      # Runs the code sandbox on the host's Docker (root-equivalent: this VM is dedicated to InterviewBud).
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres: { condition: service_healthy }
+      tts: { condition: service_started }
+
+  copilot:
+    build: { context: ../copilot-runtime }
+    restart: unless-stopped
+    environment:
+      INTERVIEWBUD_API: http://api:8765
+      WEB_ORIGIN: ${WEB_ORIGINS}
+
+  tts:
+    build: { context: ../infra/pocket-tts }
+    restart: unless-stopped
+    environment:
+      API_KEY: ${TTS_SERVER_API_KEY}
+    volumes: [tts_data:/data]
+
+  postgres:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: interviewbud
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: interviewbud
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U interviewbud"]
+      interval: 5s
+      retries: 20
+
+volumes:
+  caddy_data:
+  caddy_config:
+  api_data:
+  tts_data:
+  pgdata:

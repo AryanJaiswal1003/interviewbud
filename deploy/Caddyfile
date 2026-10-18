@@ -1,0 +1,28 @@
+{$DOMAINS} {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		Permissions-Policy "camera=(self), microphone=(self), geolocation=()"
+		-Server
+	}
+	handle /api/copilotkit* {
+		reverse_proxy copilot:8766
+	}
+	handle /api/* {
+		reverse_proxy api:8765
+	}
+	handle /ws/* {
+		reverse_proxy api:8765
+	}
+	handle {
+		root * /srv
+		@assets path /assets/* /vad/*
+		header @assets Cache-Control "public, max-age=31536000, immutable"
+		header /index.html Cache-Control "no-cache"
+		try_files {path} /index.html
+		file_server
+	}
+}
