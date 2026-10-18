@@ -20,15 +20,20 @@ flowchart LR
     A --> T["tts: Pocket TTS (CPU)"]
     A --> P[("postgres")]
     A -->|docker.sock| S["sandbox container<br/>(started by the API)"]
+    A -->|Playwright WS| BR["browser: Chromium<br/>(own network)"]
+    BR --> I
     A --> Z["Azure model (existing resource)"]
 ```
 
 * `web` gets and renews Let's Encrypt certificates for every hostname in `DOMAINS` automatically.
 * `api` mounts the host's Docker socket to run candidate code in the hardened sandbox container. That is
   root-equivalent on the VM, which is why the VM runs nothing else.
+* `browser` reads and fills application forms. It sits alone on the `browsing` network with the API (no database,
+  no Docker socket); its endpoint path is a random secret (`BROWSER_PATH`), and the API refuses any page request
+  that isn't to a public internet address.
 * Data lives in Docker volumes:
   * `pgdata`: the database.
-  * `api_data`: the problem bank, Whisper model and signing key.
+  * `api_data`: the problem bank, Whisper model, signing key, uploaded resumes and application screenshots.
   * `tts_data`: TTS weights and voices.
   * `caddy_data`: certificates.
 
@@ -60,10 +65,11 @@ az vm deallocate -g interviewbud-prod-rg -n interviewbud-prod
 az vm start -g interviewbud-prod-rg -n interviewbud-prod
 ```
 
-## First sign-up
+## First account
 
-The first account created on a fresh install becomes the **admin** and can approve interviewer lessons and manage
-the shared voices. Sign up yourself before sharing the link.
+There's no sign-up: people give their name and the browser keeps their account. The first account created on a fresh
+install becomes the **admin** and can approve interviewer lessons and manage the shared voices, so open the site
+yourself first.
 
 ## Changing secrets
 

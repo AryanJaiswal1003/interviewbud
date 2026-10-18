@@ -773,25 +773,30 @@ tokens-per-minute limit, or move memory extraction to the cheaper model.
 
 ### Accounts and sessions
 
+There is no sign-up or sign-in. A person gives their name and gets an account; the browser keeps it.
+
 ```mermaid
 sequenceDiagram
-    participant B as Browser
+    participant B as Browser (localStorage: id, name, account key)
     participant A as API
     participant DB as Postgres
-    B->>A: POST /api/auth/login {email, password, remember}
-    A->>A: throttle (8 failures / 15 min per email and per IP)
-    A->>DB: user by email, Argon2id verify (dummy hash if no user, same timing)
-    A->>DB: auth_sessions(id = SHA-256(token), remember, UA, IP, expires_at)
-    A-->>B: Set-Cookie ib_session (HttpOnly, SameSite=Lax, Max-Age 30d only if remember)
+    B->>A: POST /api/auth/start {name}
+    A->>DB: users(display_name, account_key_hash = SHA-256(key))
+    A-->>B: account key (once) + Set-Cookie ib_session (HttpOnly, SameSite=Lax, 30 days, sliding)
+    Note over B: next visit, or after "Switch account": pick a saved account
+    B->>A: POST /api/auth/switch {account_key}
+    A->>A: throttle (8 failures / 15 min per IP)
+    A->>DB: user by SHA-256(key) → new auth_sessions row
     B->>A: any /api request (cookie)
     A->>DB: session by SHA-256(token), not revoked or expired, slide expiry (at most every 5 min)
 ```
 
-* Email and password; Argon2id hashes (rehashed on login when parameters change). 8–128 characters, not the email.
-* "Remember this device": persistent 30-day cookie (sliding). Otherwise a browser-session cookie with a 12-hour
-  sliding server lifetime. Devices are listed and revocable on the profile; changing the password signs out every
-  other device.
-* The database stores only token hashes, so a leaked table can't be replayed.
+* The welcome page lists the accounts saved in this browser (name and short account id) and offers "I'm someone
+  else". Anyone using the browser can open its saved accounts, which the welcome page says; "Remove this account
+  from this browser" and account deletion are on the profile.
+* The account key is a 256-bit random secret; only its hash is stored, and the session table holds only token
+  hashes, so a leaked database can't be replayed. `POST /api/auth/account-key` rotates it (older accounts made with
+  email and password get one the first time they're opened, then live in the browser like the rest).
 * First account = admin (and owner of interviews created before accounts existed). Admins approve interviewer lessons
   and manage the shared voice catalogue; lessons never auto-activate.
 * CopilotKit runs reach the agents server-to-server without the browser's cookie, so the browser passes a 12-hour
@@ -801,7 +806,7 @@ sequenceDiagram
 
 | Cookie | Set by | Purpose | Lifetime |
 |---|---|---|---|
-| `ib_session` | API, HttpOnly | Sign-in | browser session, or 30 days with "remember" |
+| `ib_session` | API, HttpOnly | The account in use | 30 days, sliding |
 | `ib_consent` | Banner (JS) | `all` or `essential` | 1 year |
 | `ib_aid` | API, HttpOnly, only after `ib_consent=all` | Anonymous analytics device id | 1 year |
 
@@ -840,9 +845,10 @@ sign-ups and analytics writes are rate-limited; one sandbox run per interview at
 ### Tests
 
 Integration tests run against a separate `interviewbud_test` database (a guard refuses any other), with the real
-sandbox and the real problem bank: sign-up/login/logout cookies, throttling, cross-site blocks, owner isolation over
-REST and WebSocket, password change revoking other devices, admin-only global changes, avatar byte checks, security
-headers, the injection wrapper, the zip-bomb guard and the sandbox attacks above.
+sandbox and the real problem bank: name-only accounts and account keys (only hashes stored, rotation retires the old
+key, switch throttling), cross-site blocks, owner isolation over REST and WebSocket, admin-only global changes,
+avatar byte checks, security headers, the injection wrapper, the zip-bomb guard, the sandbox attacks above, the
+screening capture rules, and the application flow end to end in a real browser against a local test form.
 
 ---
 
@@ -874,7 +880,7 @@ flowchart LR
   whitespace, markdown and quote styles normalised). Answers are stored verbatim as confirmed facts, and resume
   facts arrive as suggestions. Drafts use confirmed facts only and mark what's missing in [brackets]. Web pages,
   answers and resumes reach the model as untrusted blocks.
-* **Never automatic:** application answers are only drafted, edited and approved. Nothing is filled in or submitted.
+* **Never automatic:** nothing is sent to an employer without the candidate's explicit click (section 23).
 * **Speed:** journey steps run with `PREP_REASONING_EFFORT=low`. Measured: intake 48 s, plan 39 s, practice setup
   44 s, feedback about 2 min after scoring.
 * **Durability:** every step's output is in Postgres. On startup `resume_interrupted_work()` restarts intake, planning
@@ -902,4 +908,59 @@ flowchart LR
 * **Set `COOKIE_SECURE=true` behind HTTPS** so the session cookie is never sent over plain HTTP.
 * **The API controls Docker** to run the sandbox, which is root-equivalent on the host: run the API on a dedicated
   machine or move the sandbox behind a separate runner service (or gVisor/Firecracker) for production.
-* **No email verification or password reset yet** (both need an email provider).
+* **Accounts live in the browser.** Clearing site data loses the saved accounts (the data stays on the server, but
+  there's no recovery without the key). Anyone using that browser can open its saved accounts.
+* **Applying** works on forms made of standard inputs, selects, radio groups and Greenhouse-style dropdowns.
+  Custom widgets (e.g. Ashby's yes/no buttons) show up as fields we couldn't fill, and the candidate finishes on the
+  site. Many boards run an invisible CAPTCHA on submit, which may stop an automated submission; we hand over then.
+
+---
+
+## 23. Screening call, similar jobs and applying
+
+```mermaid
+flowchart LR
+    J["Posting read"] --> RF["Application form read in a real browser<br/>(fields, options, required)"]
+    J --> CV["Coverage: requirements without evidence"]
+    RF --> CL["Screening checklist: gaps (must-haves first)<br/>+ the form's own questions"]
+    CV --> CL
+    CL --> CALL["Screening call (voice or typed):<br/>friendly screener, one question at a time,<br/>never repeats, wraps up when they're done"]
+    CALL -->|each answer| LIVE["live capture (quote-checked) → checklist on screen"]
+    CALL -->|after| FIN["final capture over the transcript:<br/>confirmed facts + application answers"]
+    FIN --> PLAN["coverage → plan vN+1 → technical practice round"]
+    FIN --> MAP["proposed form values, each with its source"]
+    MAP --> OK["candidate reviews and approves"] --> FILL["fill the real form + screenshot (not sent)"] --> SEND["Send, only on their click"]
+    PLAN --> FB["feedback + similar jobs"]
+```
+
+* **Screening call** (`interviews.kind = 'screening'`). Built from data, so it starts instantly: the checklist is the
+  requirements without confirmed evidence (must-haves first) plus the application form's questions. The screener
+  persona shares the interviewer's speaking rules and guardrails, has only `advance_phase` and `end_interview`, and
+  sees in its live state what's still to cover, what it already asked (never repeated) and when the candidate said
+  they're done. Typed mode is the same runtime with voice off (`start {voice: false}`).
+* **Capture rules.** An answer is kept only if its quote is really in the candidate's own turns (`verify`), option
+  answers must be one of the form's options, and the screener's words never count. Live capture (bounded to 30 s per
+  turn) fills the on-screen checklist; the pass after the call covers anything missed. Requirement answers become
+  confirmed facts with `source = 'screening'` (editable and removable); form answers stay on the call's record.
+  Then the plan is regenerated and the technical round is created.
+* **Similar jobs** (`prep/jobs.py`). The posting's own board (Greenhouse, Lever or Ashby) plus `JOB_BOARDS`; public
+  job lists cached for an hour; ranked by title, seniority and location; the best 14 re-ranked by the model with
+  their descriptions against the requirements and confirmed facts. Every suggestion links to the real posting;
+  "Prepare and apply" starts a new preparation for it.
+* **Applying** (`apply/`, table `applications`, append-only `history`):
+  1. *Read:* the form is opened in a browser (in production a separate Playwright container on its own network,
+     driven over WebSocket; every page request is checked to be a public internet address) and every field is
+     classified: contact, file, question, consent, voluntary self-ID, sensitive.
+  2. *Map:* contact fields from the application details; the resume file; questions from what they said on the
+     screening call (verbatim turns), confirmed facts and approved drafts, each value naming its source. No source,
+     no value. Voluntary self-ID is never answered for them; sensitive fields (IDs, date of birth, bank details) are
+     never filled; consent boxes are theirs to tick.
+  3. *Approve:* the candidate's reviewed values become the approved snapshot; options are validated.
+  4. *Fill:* the real form is filled and screenshotted. Nothing is sent.
+  5. *Send:* only with an explicit confirmation, after a preview newer than the approval, with every required field
+     answered and every field filled. It presses the form's own submit button, reports the confirmation text, and
+     stops at a human check instead of getting past it.
+* **Interviewer tools for the workspace:** `highlight_code` (lines in the editor, with a note) and `write_note`
+  (shared notes), alongside `show_panel` and `draw_on_whiteboard`. The prompt tells it to explain the tools, help
+  read error messages without fixing the logic, and reassure.
+
