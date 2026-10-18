@@ -1,6 +1,6 @@
-import { Briefcase, FileText, GraduationCap, Home, LayoutList, LogOut, Moon, Plus, Settings as SettingsIcon, Sun } from "lucide-react";
+import { ArrowLeftRight, Briefcase, FileText, GraduationCap, Home, LayoutList, Moon, Plus, Settings as SettingsIcon, Sun } from "lucide-react";
 import { lazy, Suspense, useEffect, useState } from "react";
-import { Link, NavLink, Outlet, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { Link, Navigate, NavLink, Outlet, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { ConsentBanner } from "./components/ConsentBanner";
 import { track } from "./lib/analytics";
 import { RequireAuth, useAuth } from "./lib/auth";
@@ -18,7 +18,8 @@ const Settings = lazy(() => import("./pages/Settings"));
 const Profile = lazy(() => import("./pages/Profile"));
 const Prep = lazy(() => import("./pages/Prep"));
 const PrepJourney = lazy(() => import("./pages/PrepJourney"));
-const AuthPage = lazy(() => import("./pages/AuthPage"));
+const Welcome = lazy(() => import("./pages/AuthPage"));
+const Landing = lazy(() => import("./pages/Landing"));
 
 /** Whether an interview could run right now, polled for the rail. */
 function useHealth() {
@@ -127,15 +128,15 @@ function UserChip() {
     <div className="mt-3 flex items-center gap-2.5 rounded-xl px-2 py-2 hover:bg-white/5">
       <Link to="/profile" className="flex min-w-0 flex-1 items-center gap-2.5" title="Your profile">
         {user.avatar_url ? <img src={user.avatar_url} alt="" className="h-8 w-8 shrink-0 rounded-full object-cover" />
-          : <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-sm font-semibold ${bg}`}>{(user.display_name || user.email).charAt(0).toUpperCase()}</span>}
+          : <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-sm font-semibold ${bg}`}>{(user.display_name || "?").charAt(0).toUpperCase()}</span>}
         <span className="min-w-0">
-          <span className="block truncate text-sm font-medium">{user.display_name || user.email}</span>
-          <span className="block truncate text-xs text-white/45">{user.email}</span>
+          <span className="block truncate text-sm font-medium">{user.display_name}</span>
+          <span className="block truncate font-mono text-xs text-white/45">ID {user.account_id}</span>
         </span>
       </Link>
-      <button aria-label="Log out" title="Log out" className="rounded-md p-1.5 text-white/50 hover:bg-white/10 hover:text-white"
-        onClick={async () => { await logout(); nav("/login"); }}>
-        <LogOut size={16} />
+      <button aria-label="Switch account" title="Switch account" className="rounded-md p-1.5 text-white/50 hover:bg-white/10 hover:text-white"
+        onClick={async () => { await logout(); nav("/welcome"); }}>
+        <ArrowLeftRight size={16} />
       </button>
     </div>
   );
@@ -171,16 +172,27 @@ function ThemeSwitch() {
   );
 }
 
+/** Signed-out visitors see the landing page at "/", and are sent to the welcome page from anywhere else. */
+function Gate() {
+  const { user, loading } = useAuth();
+  const loc = useLocation();
+  if (loading) return <div className="flex min-h-full items-center justify-center bg-paper text-graphite">Loading…</div>;
+  if (!user && loc.pathname === "/") return <Suspense fallback={null}><Landing /></Suspense>;
+  return <RequireAuth><Shell /></RequireAuth>;
+}
+
 export default function App() {
   return (
     <>
     <PageViews />
     <ConsentBanner />
     <Routes>
-      <Route path="/login" element={<Suspense fallback={null}><AuthPage mode="login" /></Suspense>} />
-      <Route path="/signup" element={<Suspense fallback={null}><AuthPage mode="signup" /></Suspense>} />
+      <Route path="/welcome" element={<Suspense fallback={null}><Welcome /></Suspense>} />
+      {/* Old links */}
+      <Route path="/login" element={<Navigate to="/welcome" replace />} />
+      <Route path="/signup" element={<Navigate to="/welcome" replace />} />
       <Route path="/interview/:id" element={<RequireAuth><Suspense fallback={null}><Room /></Suspense></RequireAuth>} />
-      <Route element={<RequireAuth><Shell /></RequireAuth>}>
+      <Route element={<Gate />}>
         <Route path="/" element={<Hub />} />
         <Route path="/new" element={<NewInterview />} />
         <Route path="/dashboard" element={<Dashboard />} />

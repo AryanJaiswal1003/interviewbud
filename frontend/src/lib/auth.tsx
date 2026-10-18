@@ -4,7 +4,7 @@ import { api } from "./api";
 import { setTheme } from "./theme";
 
 export type Me = {
-  id: string; email: string; display_name: string; headline: string; accent: string; timezone: string;
+  id: string; account_id: string; display_name: string; headline: string; accent: string; timezone: string;
   avatar_url: string | null; created_at: string; is_admin: boolean;
   preferences: {
     interviewer_name?: string; default_role?: string; default_seniority?: string; default_duration?: number;
@@ -12,11 +12,45 @@ export type Me = {
   };
 };
 
+/** An account remembered in this browser. The key is what lets the browser use it again; it never leaves this
+ *  device except to open the account. */
+export type SavedAccount = { id: string; account_id: string; name: string; key: string; last_used: number };
+
+const STORE = "ib-accounts";
+
+export function savedAccounts(): SavedAccount[] {
+  try {
+    const xs = JSON.parse(localStorage.getItem(STORE) || "[]");
+    return Array.isArray(xs) ? xs.filter((x) => x && x.id && x.key).sort((a, b) => b.last_used - a.last_used) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveAccount(a: Omit<SavedAccount, "last_used">) {
+  try {
+    const rest = savedAccounts().filter((x) => x.id !== a.id);
+    localStorage.setItem(STORE, JSON.stringify([{ ...a, last_used: Date.now() }, ...rest]));
+  } catch {
+    /* storage blocked: this visit still works, the account just won't be offered next time */
+  }
+}
+
+export function forgetAccount(id: string) {
+  try {
+    localStorage.setItem(STORE, JSON.stringify(savedAccounts().filter((x) => x.id !== id)));
+  } catch {
+    /* nothing saved */
+  }
+}
+
 type Auth = {
   user: Me | null;
   loading: boolean;
-  login: (email: string, password: string, remember: boolean) => Promise<void>;
-  signup: (email: string, password: string, displayName: string, remember: boolean) => Promise<void>;
+  accounts: SavedAccount[];
+  start: (name: string) => Promise<void>;
+  choose: (a: SavedAccount) => Promise<void>;
+  forget: (id: string) => void;
   logout: () => Promise<void>;
   update: (patch: Partial<Me> & { preferences?: Partial<Me["preferences"]> }) => Promise<Me>;
   setUser: (u: Me | null) => void;
@@ -27,6 +61,8 @@ const Ctx = createContext<Auth | null>(null);
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUserState] = useState<Me | null>(null);
   const [loading, setLoading] = useState(true);
+  const [accounts, setAccounts] = useState<SavedAccount[]>(savedAccounts);
+  const refresh = () => setAccounts(savedAccounts());
 
   const setUser = useCallback((u: Me | null) => {
     setUserState(u);
@@ -34,7 +70,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    api<Me>("/api/auth/me").then(setUser).catch(() => setUser(null)).finally(() => setLoading(false));
+    api<Me>("/api/auth/me").then(async (u) => {
+      setUser(u);
+      // Signed in from before accounts lived in the browser: keep a key for this account here too.
+      if (!savedAccounts().some((a) => a.id === u.id)) {
+        const k = await api<{ account_key: string }>("/api/auth/account-key", { method: "POST" }).catch(() => null);
+        if (k) { saveAccount({ id: u.id, account_id: u.account_id, name: u.display_name, key: k.account_key }); refresh(); }
+      }
+    }).catch(() => setUser(null)).finally(() => setLoading(false));
     // Any API call that comes back 401 (session expired or revoked elsewhere) signs this tab out.
     const out = () => setUserState(null);
     window.addEventListener("ib:unauthorized", out);
@@ -44,13 +87,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const value: Auth = {
     user,
     loading,
+    accounts,
     setUser,
-    login: async (email, password, remember) =>
-      setUser(await api<Me>("/api/auth/login", { method: "POST", body: JSON.stringify({ email, password, remember }) })),
-    signup: async (email, password, display_name, remember) =>
-      setUser(await api<Me>("/api/auth/signup", {
-        method: "POST", body: JSON.stringify({ email, password, display_name, remember }),
-      })),
+    start: async (name) => {
+      const r = await api<Me & { account_key: string }>("/api/auth/start", { method: "POST", body: JSON.stringify({ name }) });
+      saveAccount({ id: r.id, account_id: r.account_id, name: r.display_name, key: r.account_key });
+      refresh();
+      const { account_key: _key, ...me } = r;
+      void _key;
+      setUser(me);
+    },
+    choose: async (a) => {
+      try {
+        const me = await api<Me>("/api/auth/switch", { method: "POST", body: JSON.stringify({ account_key: a.key }) });
+        saveAccount({ ...a, name: me.display_name, account_id: me.account_id });
+        refresh();
+        setUser(me);
+      } catch (e: any) {
+        if (e.status === 404) { forgetAccount(a.id); refresh(); }
+        throw e;
+      }
+    },
+    forget: (id) => { forgetAccount(id); refresh(); },
     logout: async () => {
       await api("/api/auth/logout", { method: "POST" }).catch(() => {});
       setUserState(null);
@@ -58,6 +116,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     update: async (patch) => {
       const u = await api<Me>("/api/auth/me", { method: "PATCH", body: JSON.stringify(patch) });
       setUser(u);
+      if (patch.display_name) { const a = savedAccounts().find((x) => x.id === u.id); if (a) { saveAccount({ ...a, name: u.display_name }); refresh(); } }
       return u;
     },
   };
@@ -70,12 +129,12 @@ export function useAuth(): Auth {
   return v;
 }
 
-/** Sends signed-out visitors to the login page, then back to where they were going. */
+/** Sends visitors without an account in use to the welcome page (name or account picker), then back. */
 export function RequireAuth({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
   const loc = useLocation();
   if (loading) return <div className="flex min-h-full items-center justify-center bg-paper text-graphite">Loading…</div>;
-  if (!user) return <Navigate to={`/login?next=${encodeURIComponent(loc.pathname + loc.search)}`} replace />;
+  if (!user) return <Navigate to={`/welcome?next=${encodeURIComponent(loc.pathname + loc.search)}`} replace />;
   return <>{children}</>;
 }
 

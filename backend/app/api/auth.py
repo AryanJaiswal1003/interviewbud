@@ -1,11 +1,13 @@
-"""Sign up, log in, profile and devices. Email + password for now."""
+"""Accounts without sign-up or sign-in: a person gives their name and gets an account. The browser keeps the
+account's id, name and a random account key (localStorage), and offers the accounts saved on it to pick from;
+picking one exchanges its key for the usual HttpOnly session cookie. Only the key's SHA-256 is stored."""
 
 import re
 import zlib
 from zoneinfo import available_timezones
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,62 +25,68 @@ AVATAR_TYPES = {"image/png", "image/jpeg", "image/webp"}
 
 def me_view(u: User) -> dict:
     return {
-        "id": str(u.id), "email": u.email, "display_name": u.display_name, "headline": u.headline,
+        "id": str(u.id), "account_id": account_id(u), "display_name": u.display_name, "headline": u.headline,
         "accent": u.accent, "timezone": u.timezone, "preferences": u.preferences or {}, "is_admin": u.is_admin,
         "avatar_url": f"/api/auth/me/avatar?v={zlib.crc32(u.avatar):x}" if u.avatar else None,
         "created_at": auth.utc(u.created_at),
     }
 
 
-class SignupIn(BaseModel):
-    email: EmailStr
-    password: str
-    display_name: str = Field("", max_length=120)
-    remember: bool = False
+class StartIn(BaseModel):
+    name: str = Field(..., min_length=1, max_length=60)
 
 
-class LoginIn(BaseModel):
-    email: EmailStr
-    password: str
-    remember: bool = False
+class SwitchIn(BaseModel):
+    account_key: str = Field(..., min_length=20, max_length=200)
 
 
-@router.post("/signup")
-async def signup(body: SignupIn, request: Request, response: Response, db: AsyncSession = Depends(get_db)):
-    email = body.email.strip().lower()
-    auth.throttled(auth.signup_throttle, f"ip:{auth.client_ip(request)}", "sign-ups from this network")
-    if problem := auth.password_problem(body.password, email):
-        raise HTTPException(400, problem)
-    if await db.scalar(select(User).where(User.email == email)):
-        raise HTTPException(409, "An account with this email already exists. Log in instead.")
-    user = User(email=email, password_hash=auth.hash_password(body.password),
-                display_name=body.display_name.strip() or email.split("@")[0],
+def account_id(u: User) -> str:
+    """The short id people see for an account (the first part of its UUID)."""
+    return str(u.id).split("-")[0].upper()
+
+
+@router.post("/start")
+async def start(body: StartIn, request: Request, response: Response, db: AsyncSession = Depends(get_db)):
+    """A new account from just a name. Returns the account key once: the browser stores it to come back."""
+    name = re.sub(r"\s+", " ", body.name).strip()
+    if not name:
+        raise HTTPException(400, "Tell us your name")
+    auth.throttled(auth.signup_throttle, f"ip:{auth.client_ip(request)}", "new accounts from this network")
+    key = auth.new_account_key()
+    user = User(display_name=name[:60], account_key_hash=auth.key_hash(key),
                 preferences={"theme": "dark", "interviewer_name": "Alex"})
     db.add(user)
     await db.flush()
-    # The first person to sign up administers the install, and owns interviews made before accounts existed.
+    # The first account administers the install, and owns interviews made before accounts existed.
     if await db.scalar(select(func.count()).select_from(User)) == 1:
         user.is_admin = True
         await db.execute(update(Interview).where(Interview.owner_id.is_(None)).values(owner_id=user.id))
-    await auth.create_session(db, user, body.remember, request, response)
-    return me_view(user)
+    await auth.create_session(db, user, True, request, response)
+    return {**me_view(user), "account_key": key}
 
 
-@router.post("/login")
-async def login(body: LoginIn, request: Request, response: Response, db: AsyncSession = Depends(get_db)):
-    email = body.email.strip().lower()
-    keys = (f"email:{email}", f"ip:{auth.client_ip(request)}")
-    if wait := auth.login_throttle.blocked(*keys):
+@router.post("/switch")
+async def switch(body: SwitchIn, request: Request, response: Response, db: AsyncSession = Depends(get_db)):
+    """Use an account saved in this browser."""
+    ip = f"ip:{auth.client_ip(request)}"
+    if wait := auth.login_throttle.blocked(ip):
         raise HTTPException(429, f"Too many attempts. Try again in {int(wait // 60) + 1} minutes.")
-    user = await db.scalar(select(User).where(User.email == email))
-    if not auth.verify_password(user, body.password):
-        auth.login_throttle.fail(*keys)
-        raise HTTPException(401, "That email and password don't match.")
-    auth.login_throttle.reset(keys[0])
-    if auth._ph.check_needs_rehash(user.password_hash):
-        user.password_hash = auth.hash_password(body.password)
-    await auth.create_session(db, user, body.remember, request, response)
+    user = await db.scalar(select(User).where(User.account_key_hash == auth.key_hash(body.account_key)))
+    if not user:
+        auth.login_throttle.fail(ip)
+        raise HTTPException(404, "That account isn't available any more.")
+    user.last_login_at = utcnow()
+    await auth.create_session(db, user, True, request, response)
     return me_view(user)
+
+
+@router.post("/account-key")
+async def rotate_key(user: User = Depends(auth.current_user), db: AsyncSession = Depends(get_db)):
+    """A new account key for the signed-in account (older accounts have none yet). The old key stops working."""
+    key = auth.new_account_key()
+    user.account_key_hash = auth.key_hash(key)
+    await db.commit()
+    return {"account_key": key, "id": str(user.id), "account_id": account_id(user), "name": user.display_name}
 
 
 @router.post("/logout")
@@ -180,26 +188,6 @@ async def get_avatar(user: User = Depends(auth.current_user)):
     return Response(user.avatar, media_type=user.avatar_type, headers={"Cache-Control": "private, max-age=86400"})
 
 
-class PasswordIn(BaseModel):
-    current: str
-    new: str
-
-
-@router.post("/me/password")
-async def change_password(body: PasswordIn, found=Depends(auth.current_session), db: AsyncSession = Depends(get_db)):
-    sess, user = found
-    if not auth.verify_password(user, body.current):
-        raise HTTPException(400, "Your current password isn't right.")
-    if problem := auth.password_problem(body.new, user.email):
-        raise HTTPException(400, problem)
-    user.password_hash = auth.hash_password(body.new)
-    # A new password signs out every other device.
-    await db.execute(update(AuthSession).where(AuthSession.user_id == user.id, AuthSession.id != sess.id,
-                                               AuthSession.revoked_at.is_(None)).values(revoked_at=utcnow()))
-    await db.commit()
-    return {"ok": True}
-
-
 @router.get("/sessions")
 async def sessions(found=Depends(auth.current_session), db: AsyncSession = Depends(get_db)):
     current, user = found
@@ -229,14 +217,14 @@ async def revoke_others(found=Depends(auth.current_session), db: AsyncSession = 
 
 
 class DeleteIn(BaseModel):
-    password: str
+    confirm: str
 
 
 @router.post("/me/delete")
 async def delete_account(body: DeleteIn, response: Response, user: User = Depends(auth.current_user),
                          db: AsyncSession = Depends(get_db)):
-    if not auth.verify_password(user, body.password):
-        raise HTTPException(400, "Your password isn't right.")
+    if body.confirm != "delete":
+        raise HTTPException(400, "Type delete to confirm")
     ivs = (await db.scalars(select(Interview).where(Interview.owner_id == user.id))).all()
     if any(iv.id in RUNTIMES for iv in ivs):
         raise HTTPException(409, "End your live interview first.")

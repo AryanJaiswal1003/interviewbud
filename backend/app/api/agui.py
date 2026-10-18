@@ -71,7 +71,7 @@ async def interviewer(inp: RunAgentInput, request: Request):
             async with SessionLocal() as db:
                 iv = await db.get(Interview, iid)
             if user_id is None or iv is None or iv.owner_id != user_id:
-                raise PermissionError("Sign in again to chat with the interviewer")
+                raise PermissionError("Reload the page to chat with the interviewer")
             rt = await get_runtime(iid)
             sink = Sink()
             rt.spawn(rt.handle_text(_last_user(inp), sink=sink))
@@ -159,7 +159,7 @@ async def analyst(inp: RunAgentInput, request: Request):
         try:
             user_id = auth.verify_agent_token((inp.forwarded_props or {}).get("agentToken"))
             if user_id is None:
-                raise PermissionError("Sign in again to use the analyst")
+                raise PermissionError("Reload the page to use the analyst")
             frontend = [{"type": "function", "function": {
                 "name": t.name, "description": t.description,
                 "parameters": t.parameters or {"type": "object", "properties": {}}}} for t in (inp.tools or [])]

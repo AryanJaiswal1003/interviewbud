@@ -37,6 +37,14 @@ _ph = PasswordHasher()
 _DUMMY_HASH = _ph.hash(secrets.token_urlsafe(16))
 
 
+def new_account_key() -> str:
+    return "ibk_" + secrets.token_urlsafe(32)
+
+
+def key_hash(key: str) -> str:
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
 def hash_password(password: str) -> str:
     return _ph.hash(password)
 
@@ -114,7 +122,7 @@ async def session_for_token(db: AsyncSession, token: str | None) -> tuple[AuthSe
 async def current_session(request: Request, db: AsyncSession = Depends(get_db)) -> tuple[AuthSession, User]:
     found = await session_for_token(db, request.cookies.get(COOKIE))
     if not found:
-        raise HTTPException(401, "Sign in to continue")
+        raise HTTPException(401, "Choose your account to continue")
     request.state.user_id = found[1].id
     return found
 

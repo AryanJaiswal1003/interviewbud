@@ -1,4 +1,5 @@
-"""Auth against the real app and the dev Postgres (no mocks). Every user created here is deleted afterwards."""
+"""Accounts and access control against the real app and the test Postgres (no mocks). Accounts are a name plus an
+account key kept in the browser; every account created here is deleted afterwards."""
 
 import uuid
 
@@ -11,7 +12,6 @@ from app import auth
 from app.db import Candidate, Interview, SessionLocal, User, init_db
 from app.main import app
 
-PW = "correct horse battery"
 
 
 @pytest.fixture(autouse=True)
@@ -21,7 +21,7 @@ async def _db():
         t.hits.clear()
     yield
     async with SessionLocal() as db:
-        await db.execute(delete(User).where(User.email.like("authtest-%@example.com")))
+        await db.execute(delete(User).where(User.display_name.like("authtest-%")))
         await db.commit()
 
 
@@ -29,75 +29,92 @@ def client() -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver")
 
 
-def email() -> str:
-    return f"authtest-{uuid.uuid4().hex[:10]}@example.com"
+def name() -> str:
+    return f"authtest-{uuid.uuid4().hex[:10]}"
 
 
 def set_cookie(r: httpx.Response) -> str:
     return next(v for k, v in r.headers.multi_items() if k == "set-cookie" and v.startswith(auth.COOKIE))
 
 
-async def test_signup_login_logout_and_remember_cookie():
-    e = email()
+async def test_name_only_account_switch_and_logout():
+    n = name()
     async with client() as c:
-        r = await c.post("/api/auth/signup", json={"email": e.upper(), "password": PW, "display_name": "Ana"})
+        r = await c.post("/api/auth/start", json={"name": f"  {n}  "})
         assert r.status_code == 200, r.text
-        assert r.json()["email"] == e  # normalised to lower case
+        me = r.json()
+        key = me["account_key"]
+        assert me["display_name"] == n and key.startswith("ibk_") and len(me["account_id"]) == 8
         cookie = set_cookie(r)
-        assert "HttpOnly" in cookie and "samesite=lax" in cookie.lower() and "Max-Age" not in cookie  # browser session
-        assert (await c.get("/api/auth/me")).json()["display_name"] == "Ana"
+        assert "HttpOnly" in cookie and "samesite=lax" in cookie.lower() and "Max-Age=2592000" in cookie  # stays
+        assert "account_key" not in (await c.get("/api/auth/me")).json()  # the key is only handed out once
         assert (await c.post("/api/auth/logout")).status_code == 200
         assert (await c.get("/api/auth/me")).status_code == 401
 
-        assert (await c.post("/api/auth/login", json={"email": e, "password": "wrong password"})).status_code == 401
-        r = await c.post("/api/auth/login", json={"email": e, "password": PW, "remember": True})
-        assert r.status_code == 200
-        assert "Max-Age=2592000" in set_cookie(r)  # remembered for 30 days
+        # Picking the account saved in this browser.
+        assert (await c.post("/api/auth/switch", json={"account_key": "ibk_" + "x" * 40})).status_code == 404
+        r = await c.post("/api/auth/switch", json={"account_key": key})
+        assert r.status_code == 200 and r.json()["id"] == me["id"]
         assert (await c.get("/api/auth/me")).status_code == 200
 
     async with SessionLocal() as db:
-        u = await db.scalar(select(User).where(User.email == e))
-        assert u.password_hash.startswith("$argon2id$") and PW not in u.password_hash
+        u = await db.get(User, uuid.UUID(me["id"]))
+        assert u.account_key_hash == auth.key_hash(key) and key not in u.account_key_hash  # only the hash is stored
+        assert u.email is None and u.password_hash is None
 
 
-async def test_signup_rules():
-    e = email()
+async def test_names_are_required_and_old_endpoints_are_gone():
     async with client() as c:
-        assert (await c.post("/api/auth/signup", json={"email": e, "password": "short"})).status_code == 400
-        assert (await c.post("/api/auth/signup", json={"email": "not-an-email", "password": PW})).status_code == 422
-        assert (await c.post("/api/auth/signup", json={"email": e, "password": PW})).status_code == 200
-        r = await c.post("/api/auth/signup", json={"email": e, "password": PW})
-        assert r.status_code == 409
+        assert (await c.post("/api/auth/start", json={"name": "   "})).status_code == 400
+        assert (await c.post("/api/auth/start", json={})).status_code == 422
+        assert (await c.post("/api/auth/start", json={"name": "x" * 61})).status_code == 422
+        for path in ("/api/auth/signup", "/api/auth/login", "/api/auth/me/password"):
+            assert (await c.post(path, json={})).status_code in (404, 405)
 
 
-async def test_login_throttle_and_unknown_email_look_the_same():
-    e = email()
+async def test_switch_throttle():
     async with client() as c:
-        await c.post("/api/auth/signup", json={"email": e, "password": PW})
-        unknown = await c.post("/api/auth/login", json={"email": email(), "password": PW})
-        wrong = await c.post("/api/auth/login", json={"email": e, "password": "nope nope nope"})
-        assert unknown.status_code == wrong.status_code == 401 and unknown.json() == wrong.json()
+        key = (await c.post("/api/auth/start", json={"name": name()})).json()["account_key"]
         for _ in range(8):
-            await c.post("/api/auth/login", json={"email": e, "password": "nope nope nope"})
-        r = await c.post("/api/auth/login", json={"email": e, "password": PW})
-        assert r.status_code == 429  # even the right password waits once the limit is hit
+            await c.post("/api/auth/switch", json={"account_key": "ibk_" + uuid.uuid4().hex * 2})
+        r = await c.post("/api/auth/switch", json={"account_key": key})
+        assert r.status_code == 429  # even the right key waits once the limit is hit
+
+
+async def test_rotating_the_key_retires_the_old_one():
+    async with client() as laptop, client() as other:
+        old = (await laptop.post("/api/auth/start", json={"name": name()})).json()["account_key"]
+        new = (await laptop.post("/api/auth/account-key")).json()["account_key"]
+        assert new != old
+        assert (await other.post("/api/auth/switch", json={"account_key": old})).status_code == 404
+        assert (await other.post("/api/auth/switch", json={"account_key": new})).status_code == 200
+        sessions = (await laptop.get("/api/auth/sessions")).json()
+        assert len(sessions) == 2 and sum(s["current"] for s in sessions) == 1
+        assert (await laptop.post("/api/auth/sessions/revoke-others")).json()["signed_out"] == 1
+        assert (await other.get("/api/auth/me")).status_code == 401
 
 
 async def test_cross_site_post_is_blocked():
     async with client() as c:
-        r = await c.post("/api/auth/login", json={"email": email(), "password": PW},
-                         headers={"Origin": "https://evil.example"})
+        r = await c.post("/api/auth/start", json={"name": name()}, headers={"Origin": "https://evil.example"})
         assert r.status_code == 403
-        r = await c.post("/api/auth/login", json={"email": email(), "password": PW},
+        r = await c.post("/api/auth/switch", json={"account_key": "ibk_" + "y" * 40},
                          headers={"Origin": "http://localhost:5199"})
-        assert r.status_code == 401  # allowed origin reaches the handler
+        assert r.status_code == 404  # allowed origin reaches the handler
+
+
+async def test_deleting_an_account_needs_confirmation():
+    async with client() as c:
+        key = (await c.post("/api/auth/start", json={"name": name()})).json()["account_key"]
+        assert (await c.post("/api/auth/me/delete", json={"confirm": "yes"})).status_code == 400
+        assert (await c.post("/api/auth/me/delete", json={"confirm": "delete"})).status_code == 200
+        assert (await c.post("/api/auth/switch", json={"account_key": key})).status_code == 404
 
 
 async def test_interviews_are_private_to_their_owner():
-    a, b = email(), email()
     async with client() as ca, client() as cb:
-        ra = await ca.post("/api/auth/signup", json={"email": a, "password": PW})
-        await cb.post("/api/auth/signup", json={"email": b, "password": PW})
+        ra = await ca.post("/api/auth/start", json={"name": name()})
+        await cb.post("/api/auth/start", json={"name": name()})
         async with SessionLocal() as db:
             cand = Candidate(resume_filename="r.txt", resume_text="x")
             db.add(cand)
@@ -119,7 +136,7 @@ async def test_interviews_are_private_to_their_owner():
         b_cookie = cb.cookies.get(auth.COOKIE)
         tc = TestClient(app)
         with tc.websocket_connect(f"/ws/session/{iid}") as ws:
-            assert ws.receive_json()["message"] == "Sign in to join this interview"
+            assert ws.receive_json()["message"] == "Choose your account to join this interview"
         with tc.websocket_connect(f"/ws/session/{iid}", cookies={auth.COOKIE: b_cookie}) as ws:
             assert ws.receive_json()["message"] == "interview not found"
         async with SessionLocal() as db:
@@ -127,23 +144,9 @@ async def test_interviews_are_private_to_their_owner():
             await db.commit()
 
 
-async def test_sessions_list_revoke_and_password_change_signs_out_others():
-    e = email()
-    async with client() as laptop, client() as phone:
-        await laptop.post("/api/auth/signup", json={"email": e, "password": PW, "remember": True})
-        await phone.post("/api/auth/login", json={"email": e, "password": PW})
-        sessions = (await laptop.get("/api/auth/sessions")).json()
-        assert len(sessions) == 2 and sum(s["current"] for s in sessions) == 1
-        r = await laptop.post("/api/auth/me/password", json={"current": PW, "new": "another long password"})
-        assert r.status_code == 200
-        assert (await phone.get("/api/auth/me")).status_code == 401  # signed out
-        assert (await laptop.get("/api/auth/me")).status_code == 200  # this device stays in
-        assert (await laptop.post("/api/auth/login", json={"email": e, "password": PW})).status_code == 401
-
-
 async def test_profile_preferences_and_validation():
     async with client() as c:
-        await c.post("/api/auth/signup", json={"email": email(), "password": PW})
+        await c.post("/api/auth/start", json={"name": name()})
         r = await c.patch("/api/auth/me", json={"headline": "Hiring manager", "accent": "marine",
                                                 "timezone": "Asia/Kolkata",
                                                 "preferences": {"interviewer_name": "Priya", "default_duration": 30,
@@ -180,8 +183,8 @@ async def test_analytics_needs_consent():
 
 async def test_global_changes_need_an_admin():
     async with client() as admin, client() as member:
-        r1 = await admin.post("/api/auth/signup", json={"email": email(), "password": PW})
-        r2 = await member.post("/api/auth/signup", json={"email": email(), "password": PW})
+        r1 = await admin.post("/api/auth/start", json={"name": name()})
+        r2 = await member.post("/api/auth/start", json={"name": name()})
         assert r1.json()["is_admin"] is True and r2.json()["is_admin"] is False  # first account administers
         assert (await member.patch("/api/learning/lessons/1", json={"status": "active"})).status_code == 403
         assert (await member.post("/api/voices", json={"name": "x", "fish_model_id": "x"})).status_code == 403
@@ -190,7 +193,7 @@ async def test_global_changes_need_an_admin():
 
 async def test_avatar_must_really_be_an_image():
     async with client() as c:
-        await c.post("/api/auth/signup", json={"email": email(), "password": PW})
+        await c.post("/api/auth/start", json={"name": name()})
         html = b"<html><script>alert(document.cookie)</script></html>"
         r = await c.put("/api/auth/me/avatar", files={"file": ("a.png", html, "image/png")})
         assert r.status_code == 400
@@ -229,7 +232,7 @@ def test_docx_zip_bomb_is_refused():
 
 async def test_ended_interview_socket_closes_without_reconnect_loop():
     async with client() as c:
-        r = await c.post("/api/auth/signup", json={"email": email(), "password": PW})
+        r = await c.post("/api/auth/start", json={"name": name()})
         async with SessionLocal() as db:
             cand = Candidate(resume_filename="r.txt", resume_text="x")
             db.add(cand)

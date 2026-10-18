@@ -19,7 +19,7 @@ export async function api<T = any>(path: string, init?: RequestInit): Promise<T>
     } catch {
       /* not json */
     }
-    throw new Error(detail);
+    throw Object.assign(new Error(detail), { status: res.status });
   }
   return res.json();
 }
