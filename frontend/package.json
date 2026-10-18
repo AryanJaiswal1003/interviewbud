@@ -1,0 +1,38 @@
+{
+  "name": "frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "oxlint",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@ag-ui/client": "^1.0.2",
+    "@copilotkit/react-core": "^1.79.1",
+    "@excalidraw/excalidraw": "^0.18.1",
+    "@monaco-editor/react": "^4.7.0",
+    "@ricky0123/vad-web": "^0.0.31",
+    "lucide-react": "^0.525.0",
+    "onnxruntime-web": "^1.30.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-router-dom": "^7.18.4",
+    "recharts": "^3.10.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/node": "^24.13.3",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "@vitejs/plugin-react": "^6.1.1",
+    "oxlint": "^1.81.0",
+    "tailwindcss": "^4.3.3",
+    "typescript": "~6.0.2",
+    "vite": "^8.3.0",
+    "vite-plugin-static-copy": "^4.1.1"
+  }
+}

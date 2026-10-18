@@ -1,0 +1,119 @@
+@import "tailwindcss";
+
+/* Colour carries meaning: amber = the interviewer, marine = the candidate, coral = something failed. */
+@theme {
+  /* Palette: Shadow Grey #272727, Amber Honey #ECA400, White, Vibrant Coral #FE5F55, Bright Marine #016FB9.
+     Amber = the interviewer and the brand; marine = the candidate and anything passing; coral = failures. */
+  --color-ink: #272727;
+  --color-ink-2: #3a3a3a;
+  --color-ink-3: #4d4d4d;
+  --color-surface: #ffffff; /* cards and panels */
+  --color-primary: #272727; /* main button fill */
+  --color-primary-2: #3a3a3a;
+  --color-on-primary: #ffffff;
+  --color-onaccent: #272727; /* text on amber or white pills, in both themes */
+  --color-paper: #f6f6f4;
+  --color-paper-2: #ececea;
+  --color-line: #dfdfdb;
+  --color-graphite: #4f4f4f;
+  --color-mute: #737373;
+  --color-amber: #eca400;
+  --color-amber-soft: #fbe6ad;
+  --color-marine: #016fb9;
+  --color-marine-soft: #d6e8f6;
+  --color-marine-ink: #01558e;
+  --color-coral: #fe5f55;
+  --color-coral-soft: #ffe1de;
+  --color-alarm: #d63c32; /* coral darkened for text on white */
+  --color-ok: #016fb9;
+  /* Call room (Meet-like) */
+  --color-call: #272727;
+  --color-call-2: #303030;
+  --color-call-tile: #3c3c3c;
+  --color-call-line: #555555;
+  --color-hangup: #fe5f55;
+  /* Rubric score scale, 1 (weak) to 4 (strong) */
+  --color-s1: #ffbab4;
+  --color-s2: #f6d27c;
+  --color-s3: #94c5e9;
+  --color-s4: #016fb9;
+
+  --font-display: "Bricolage Grotesque", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Atkinson Hyperlegible Next", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+}
+
+/* Dark theme (default). Same palette: Shadow Grey surfaces, amber primary actions, marine for the candidate. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --color-ink: #f1f1ee;
+  --color-ink-2: #d9d9d5;
+  --color-ink-3: #bdbdb8;
+  --color-surface: #2a2a2a;
+  --color-primary: #eca400;
+  --color-primary-2: #f6b81f;
+  --color-on-primary: #272727;
+  --color-paper: #1d1d1d;
+  --color-paper-2: #343434;
+  --color-line: #3c3c3c;
+  --color-graphite: #c4c4bf;
+  --color-mute: #92928d;
+  --color-amber-soft: #4b3709;
+  --color-marine-soft: #123549;
+  --color-marine-ink: #8ccaf4;
+  --color-coral-soft: #4d2522;
+  --color-alarm: #ff857c;
+  --color-call: #1d1d1d;
+  --color-call-2: #272727;
+  --color-call-tile: #333333;
+  --color-call-line: #4d4d4d;
+  --color-s1: #e8776d;
+  --color-s2: #d9a520;
+  --color-s3: #3f93cf;
+  --color-s4: #57b4f2;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Graph-paper ground for the workbench areas. */
+.graph-paper {
+  background-color: var(--color-paper);
+  background-image:
+    linear-gradient(to right, color-mix(in srgb, var(--color-ink) 6%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--color-ink) 6%, transparent) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-amber);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* CopilotKit chat tuned to the palette */
+.ib-chat {
+  --copilot-kit-primary-color: var(--color-ink);
+  --copilot-kit-background-color: var(--color-paper);
+  height: 100%;
+}
