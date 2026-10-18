@@ -1,0 +1,11 @@
+{
+  "name": "interviewbud-copilot-runtime",
+  "private": true,
+  "type": "module",
+  "scripts": { "start": "node server.mjs" },
+  "dependencies": {
+    "@ag-ui/client": "1.0.2",
+    "@copilotkit/runtime": "1.79.1",
+    "express": "^5.1.0"
+  }
+}
